@@ -258,6 +258,10 @@ resource "google_cloud_run_v2_job" "exporter" {
           value = google_data_loss_prevention_deidentify_template.this.id
         }
         env {
+          name  = "DLP_MAX_RPM"
+          value = tostring(var.dlp_max_rpm)
+        }
+        env {
           name  = "LANGFUSE_HOST"
           value = var.langfuse_host
         }

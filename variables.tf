@@ -97,6 +97,17 @@ variable "dlp_min_likelihood" {
   default     = "LIKELY"
 }
 
+variable "dlp_max_rpm" {
+  type        = number
+  description = "Client-side ceiling on DLP requests per minute. The exporter self-throttles below this and backs off on quota errors, keeping runs under your project's DLP quota (600/min per region by default). Lower it if you share the DLP quota with other workloads; raise it only after raising the quota."
+  default     = 500
+
+  validation {
+    condition     = var.dlp_max_rpm >= 1 && var.dlp_max_rpm <= 10000
+    error_message = "dlp_max_rpm must be between 1 and 10000."
+  }
+}
+
 variable "labels" {
   type        = map(string)
   description = "Labels applied to created resources."

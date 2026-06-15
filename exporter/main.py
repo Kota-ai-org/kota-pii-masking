@@ -18,7 +18,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from deidentify_core import deidentify_record
+from deidentify_core import DEFAULT_MAX_RPM, DlpMasker, RateLimiter
 from google.api_core import client_options as co
 from google.cloud import dlp_v2, storage
 from langfuse_api import LangfuseAPIClient
@@ -85,6 +85,7 @@ def main():
     deidentify_template = _env("DLP_DEIDENTIFY_TEMPLATE", required=True)
     dlp_project = _env("DLP_PROJECT")
     initial_lookback_days = int(_env("INITIAL_LOOKBACK_DAYS", "1"))
+    dlp_max_rpm = int(_env("DLP_MAX_RPM", str(DEFAULT_MAX_RPM)))
 
     storage_client = storage.Client()
     watermark = _read_watermark(
@@ -102,6 +103,13 @@ def main():
         co.ClientOptions(quota_project_id=dlp_project) if dlp_project else None
     )
     dlp_client = dlp_v2.DlpServiceClient(client_options=dlp_options)
+    masker = DlpMasker(
+        dlp_client,
+        dlp_parent,
+        inspect_template,
+        deidentify_template,
+        RateLimiter(dlp_max_rpm),
+    )
 
     masked_lines = []
     max_seen = watermark
@@ -109,9 +117,7 @@ def main():
         seconds = _trace_epoch_seconds(record)
         if seconds is not None:
             max_seen = max(max_seen, seconds)
-        masked = deidentify_record(
-            dlp_client, dlp_parent, inspect_template, deidentify_template, record
-        )
+        masked = masker.mask_record(record)
         masked_lines.append(json.dumps(masked, ensure_ascii=False))
 
     object_name = f"{masked_prefix}{int(time.time())}.jsonl"

@@ -200,6 +200,11 @@ tofu apply
 - **Incremental:** the job persists the last-exported timestamp in
   `gs://<state-bucket>/watermark.json` and only pulls newer traces each run. The
   first run looks back `initial_lookback_days` (default 1).
+- **Stays under your DLP quota:** the job batches all of a trace's fields into one
+  DLP request, self-throttles below `dlp_max_rpm` (default 500, under the 600/min
+  region quota), and backs off + retries on quota errors. At high volume a run
+  paces itself and the watermark resumes the rest next run — **no action needed**.
+  Want faster catch-up? Your GCP admin can raise the DLP quota and `dlp_max_rpm`.
 - **Run on demand:**
   ```bash
   gcloud run jobs execute "$(tofu output -raw exporter_job_name)" --region <REGION> --wait
@@ -248,6 +253,7 @@ and **no write access** to your project.
 | `scheduler_paused` | | `false` | Deploy the cron paused (review first). |
 | `dlp_info_types` | | common PII set | DLP infoTypes to detect + replace. |
 | `dlp_min_likelihood` | | `LIKELY` | Minimum match confidence to act on. |
+| `dlp_max_rpm` | | `500` | Client-side DLP requests/min ceiling. The job self-throttles below this and backs off on quota errors. |
 
 ## Outputs
 

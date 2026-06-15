@@ -9,3 +9,7 @@ crash.log
 # never commit any extracted key
 .build_writer_key.json
 *_key.json
+
+# Python
+__pycache__/
+*.pyc

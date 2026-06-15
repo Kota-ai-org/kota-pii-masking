@@ -1,0 +1,11 @@
+.terraform/
+.terraform.lock.hcl
+.build/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+
+# never commit any extracted key
+.build_writer_key.json
+*_key.json

@@ -1,0 +1,24 @@
+# Customer configuration template.
+#
+# The simplest path is `./deploy.sh` (see README Step 1) — it sets everything via
+# environment variables and you don't need this file at all. Use this only if you
+# prefer the manual `tofu apply` path (README "Advanced").
+#
+# Copy to terraform.tfvars and fill in. Do NOT put Langfuse keys here — pass them
+# as environment variables so they never touch disk or version control:
+#   export TF_VAR_langfuse_public_key=pk-lf-...
+#   export TF_VAR_langfuse_secret_key=sk-lf-...
+
+project_id = "<YOUR_GCP_PROJECT_ID>"
+region     = "<REGION>"                # e.g. europe-west1, us-central1
+
+# Kota's reader identity (provided/confirmed by Kota):
+kota_sa_email = "kota-masked-reader@kota-production.iam.gserviceaccount.com"
+
+# Digest-pinned exporter image. scripts/build_image.sh prints this value.
+exporter_image = "<REGION>-docker.pkg.dev/<YOUR_PROJECT>/kota-pii-exporter/exporter@sha256:<DIGEST>"
+
+langfuse_host = "https://us.cloud.langfuse.com"
+
+# Optional — deploy the hourly cron paused so you can review the dry-run first.
+scheduler_paused = true

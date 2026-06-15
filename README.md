@@ -25,6 +25,31 @@ or models.**
 
 ---
 
+## Get the module
+
+Two ways to obtain it — pick whichever fits your workflow:
+
+**A. Download a release (no git tooling needed)**
+1. Open the [**Releases**](../../releases) page and download the latest
+   `kota-pii-masking-vX.Y.Z.tar.gz` **and** its `.sha256`.
+2. Verify integrity:
+   ```bash
+   shasum -a 256 -c kota-pii-masking-vX.Y.Z.tar.gz.sha256
+   ```
+3. Unpack and enter it:
+   ```bash
+   tar -xzf kota-pii-masking-vX.Y.Z.tar.gz && cd kota-pii-masking
+   ```
+
+**B. Pin it in your own Terraform**
+```hcl
+source = "git::https://github.com/Kota-ai-org/kota-pii-masking//?ref=v1.0.0"
+```
+
+Then follow the steps below. Questions at any point: **roee@kota-ai.com**.
+
+---
+
 ## 1. What Kota delivers to you
 
 | Deliverable | What it is |

@@ -59,7 +59,7 @@ Then follow the steps below. Questions at any point: **roee@kota-ai.com**.
 | `deploy.sh` | One-command deploy (build image → apply) |
 | `scripts/build_image.sh` | Builds the exporter image in *your* Artifact Registry |
 | `scripts/dry_run.py` | Pre-go-live review: shows masked before/after on a sample |
-| **`kota_sa_email`** | The Kota identity you authorize to read the masked bucket: `kota-masked-reader@kota-production.iam.gserviceaccount.com` |
+| **`kota_sa_email`** | The Kota identity you authorize to read the masked bucket — **provided by Kota** in your onboarding email. |
 | **Support** | Kota runs the dry-run review with you and helps with go-live |
 
 ## 2. What you deploy (and what stays yours)
@@ -129,7 +129,7 @@ spec:
   rules:
     - values:
         allowedValues:
-          - is:C02ovz1en           # Kota's Google Workspace customer ID
+          - is:<KOTA_CUSTOMER_ID>  # Kota's Workspace customer ID — provided by Kota
 ```
 ```bash
 gcloud org-policies set-policy policy.yaml
@@ -148,7 +148,7 @@ export TF_VAR_langfuse_secret_key=sk-lf-...
 
 PROJECT=<YOUR_PROJECT> \
 REGION=<REGION> \
-KOTA_SA_EMAIL=kota-masked-reader@kota-production.iam.gserviceaccount.com \
+KOTA_SA_EMAIL=<KOTA_SA_EMAIL> \   # provided by Kota in onboarding
 SCHEDULER_PAUSED=true \
 ./deploy.sh
 ```

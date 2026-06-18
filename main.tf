@@ -149,6 +149,7 @@ resource "google_secret_manager_secret" "langfuse_public_key" {
   for_each  = local.langfuse_project_names
   secret_id = "${var.name_prefix}-langfuse-public-key-${each.key}"
   project   = var.project_id
+  labels    = var.labels
   replication {
     auto {}
   }
@@ -165,6 +166,7 @@ resource "google_secret_manager_secret" "langfuse_secret_key" {
   for_each  = local.langfuse_project_names
   secret_id = "${var.name_prefix}-langfuse-secret-key-${each.key}"
   project   = var.project_id
+  labels    = var.labels
   replication {
     auto {}
   }
@@ -238,6 +240,7 @@ resource "google_cloud_run_v2_job" "exporter" {
   project             = var.project_id
   location            = var.region
   deletion_protection = false
+  labels              = var.labels
 
   template {
     template {

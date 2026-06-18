@@ -83,13 +83,19 @@ Everything runs in **your** project. The module creates:
   instantly — no key to chase.
 - **You own the masking policy.** Both DLP templates live in your project; tune
   detection/transformation anytime, no Kota redeploy.
-- **Residual-PII caveat (shared responsibility).** DLP is detection-based and
-  probabilistic — it is strong on structured PII (emails, cards, SSNs) and weaker
-  on free-form names. Whole PII-carrier fields (`userId`, raw `metadata`, `tags`)
-  are **dropped**, not just masked, and masking **fails closed** (a DLP error
-  writes nothing). Treat the masked bucket as **reduced-sensitivity** data
-  governed by your DPA with Kota, not as a guarantee of zero PII. You can tighten
-  detection (Section 7) and review a sample before go-live (Section 6).
+- **Whole trace kept, every text field masked.** The job preserves the full
+  trace structure (nothing is dropped — `userId`, `metadata`, `tags`,
+  observations, all of it) and runs DLP over **every string value**: detected PII
+  is replaced with `[INFO_TYPE]` placeholders, non-PII strings (ids, timestamps,
+  type/name) pass through unchanged.
+- **Residual-PII caveat (shared responsibility).** Because every field is kept and
+  scrubbed in place, coverage depends entirely on DLP detection, which is
+  probabilistic — strong on structured PII (emails, cards, SSNs), weaker on
+  free-form names. Masking **fails closed per chunk** (a DLP error doesn't advance
+  that project's watermark, so nothing partial is trusted). Treat the masked
+  bucket as **reduced-sensitivity** data governed by your DPA with Kota, not a
+  guarantee of zero PII — tune the inspect template to your data (Section 7) and
+  review a sample before go-live (Section 6).
 
 ---
 

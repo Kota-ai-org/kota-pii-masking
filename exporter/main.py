@@ -2,10 +2,11 @@
 
 Runs to completion on a Cloud Scheduler cron. For each configured project it
 streams full TraceWithFullDetails records from the Langfuse public API since a
-persisted watermark (oldest-first), de-identifies the transcript fields via
-Cloud DLP (see deidentify_core), and writes them as JSONL to the masked bucket
-in bounded chunks — advancing the watermark after EACH chunk. The masked bucket
-is the only resource shared with Kota; raw PII never lands in storage.
+persisted watermark (oldest-first), DLP-masks every string value while keeping
+the whole trace intact (see deidentify_core), and writes them as JSONL to the
+masked bucket in bounded chunks — advancing the watermark after EACH chunk. The
+masked bucket is the only resource shared with Kota; raw PII never lands in
+storage.
 
 Streaming + per-chunk checkpoint keeps memory flat regardless of backlog size
 and makes progress durable: a run that is OOM-killed, times out, or fails

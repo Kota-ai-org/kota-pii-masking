@@ -189,6 +189,10 @@ cron paused so you can review the dry-run first (Section 6), then unpause.
 > injected into the job at runtime — never written to the image or your shell
 > history. The `*.auto.tfvars` file holding them is gitignored.
 
+> **Group the cost.** Add `LABELS="cost-center=acme,team=ml"` to the deploy command
+> to label every PII-masking resource for billing. See
+> [Billing & cost grouping](#billing--cost-grouping).
+
 ### Step 2 — hand two values back to Kota
 
 `deploy.sh` prints them; you can re-print anytime:
@@ -256,6 +260,42 @@ tofu apply
 - **After a code change:** if Kota ships a new `exporter/` version, re-run
   `./deploy.sh` — it rebuilds, re-pins the new digest, and applies. Nothing else
   changes.
+
+## Billing & cost grouping
+
+Every PII-masking resource that **can** carry a GCP label gets two reserved labels so
+you can isolate this stack's spend in Cloud Billing reports / the BigQuery billing export:
+
+- `component = kota-pii-masking` — the canonical filter key (same across all deployments)
+- `deployment = <name_prefix>` — distinguishes multiple stacks in one project
+
+Filter your billing report on `labels.component = "kota-pii-masking"` to see all grouped spend.
+
+**Add your own grouping label** at deploy time — applied to all labelable resources:
+
+```bash
+LABELS="cost-center=acme,team=ml" \
+PROJECT=<YOUR_PROJECT> REGION=<REGION> KOTA_SA_EMAIL=<KOTA_SA_EMAIL> \
+./deploy.sh
+```
+
+(Or set `TF_VAR_labels` as a JSON map directly. `component`/`deployment` stay reserved and
+override any same-named entry.) Confirm what's applied with `tofu output billing_labels`.
+
+**Covered by the label:** masked bucket, state bucket, Langfuse secret pairs, exporter
+Cloud Run job (compute).
+
+**NOT covered — a GCP limitation, stated plainly:** DLP / Sensitive Data Protection usage
+(billed at the *project* level, with no per-resource label — and likely the largest line
+item), Cloud Scheduler, and service accounts. Labels can't attach to these.
+
+**Recommendation:**
+- **Dedicated GCP project** for the stack → group by **project** in billing; this captures
+  *everything* including DLP automatically. Labels still apply as a secondary filter. Use
+  this when clean DLP cost attribution matters.
+- **Shared project** → group by **`labels.component`**; captures storage + secrets +
+  compute. DLP spend can't be split out by label — move the stack to its own project if you
+  need DLP cost isolated.
 
 ## 7. Tuning the masking policy
 

@@ -50,3 +50,8 @@ output "dlp_inspect_template_id" {
 output "dlp_deidentify_template_id" {
   value = google_data_loss_prevention_deidentify_template.this.id
 }
+
+output "billing_labels" {
+  description = "Canonical labels applied to all labelable resources. Use as the Cloud Billing filter, e.g. label.component=kota-pii-masking."
+  value       = local.billing_labels
+}

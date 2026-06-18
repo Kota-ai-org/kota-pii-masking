@@ -21,6 +21,12 @@
 #   SCHEDULER_PAUSED  =true to deploy the hourly cron PAUSED (review the dry-run,
 #                     then unpause). Default: live (module default).
 #   AUTO_APPROVE=1    skip the interactive apply confirmation
+#   LABELS            extra GCP labels for billing grouping, "key=value,key2=value2".
+#                     Applied to every labelable resource (buckets, secrets, Cloud Run
+#                     job) so all PII-masking spend shares one label. Example:
+#                       LABELS="cost-center=acme,team=ml"
+#                     Reserved keys component/deployment are always set by the module
+#                     and can't be overridden here.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +62,18 @@ export TF_VAR_kota_sa_email="$KOTA_SA_EMAIL"
 export TF_VAR_name_prefix="$NAME_PREFIX"
 export TF_VAR_exporter_image="$DIGEST"
 [ -n "${SCHEDULER_PAUSED:-}" ] && export TF_VAR_scheduler_paused="$SCHEDULER_PAUSED"
+
+# Optional billing-grouping labels: "k=v,k2=v2" -> TF_VAR_labels JSON map.
+# Keys/values lowercased to satisfy GCP label rules ([a-z0-9_-], <=63 chars).
+if [ -n "${LABELS:-}" ]; then
+  TF_VAR_labels="$(printf '%s' "$LABELS" | tr 'A-Z' 'a-z' \
+    | jq -Rce 'split(",") | map(split("=") | {(.[0]):(.[1] // "")}) | add')" || {
+    echo "ERROR: could not parse LABELS=\"$LABELS\" (expected key=value,key2=value2)." >&2
+    exit 1
+  }
+  export TF_VAR_labels
+  echo "== applying custom labels: $TF_VAR_labels ==" >&2
+fi
 
 tofu -chdir="$HERE" init -input=false
 if [ -n "${AUTO_APPROVE:-}" ]; then

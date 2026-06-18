@@ -1,16 +1,16 @@
 """Core de-identify logic, shared by the Cloud Run job and the e2e check.
 
-Strategy: **keep the whole trace, mask only the natural-language fields**. Per
-record we DLP-mask the free-text transcript fields — `input`/`output` on the
-trace and on each observation (their full string-leaf subtree) — replacing
-detected PII with `[INFO_TYPE]` placeholders. Every other field (ids, timestamps,
-`userId`, `metadata`, `tags`, costs, type/name) is preserved AS-IS: not masked,
-not dropped. Kota receives the full trace with only the conversational content
-scrubbed.
+Strategy: **keep the whole trace, mask a fixed set of fields**. Per record we
+DLP-mask `input`, `output`, and `metadata` — on the trace and on each observation
+(their full string-leaf subtree) — replacing detected PII with `[INFO_TYPE]`
+placeholders. Every other field (ids, timestamps, `userId`, `tags`, costs,
+type/name) is preserved AS-IS: not masked, not dropped. Kota receives the full
+trace with only those fields scrubbed.
 
-Because detection is DLP-based (probabilistic) and limited to input/output, the
-result is reduced-sensitivity data, not a guarantee of zero PII — any PII outside
-the NL fields is passed through unchanged. Tune the inspect template to your data.
+Because detection is DLP-based (probabilistic) and limited to the masked fields,
+the result is reduced-sensitivity data, not a guarantee of zero PII — any PII
+outside those fields is passed through unchanged. Tune the inspect template to
+your data.
 
 Rate-limit hardening: the job runs in the customer's project, where we cannot
 raise the Cloud DLP quota (600 requests/min per region). So `DlpMasker`
@@ -48,8 +48,10 @@ DEFAULT_MAX_RPM = 500
 # raises DeadlineExceeded and is retried, instead of hanging the run silently.
 DEFAULT_DLP_TIMEOUT = 120
 
-# Natural-language fields that are DLP-masked. Everything else is kept as-is.
-NL_FIELDS = ("input", "output")
+# Fields that are DLP-masked (the free-text transcript plus metadata, which can
+# carry PII). Masked wherever they appear (trace + observations). Every other
+# field is kept as-is.
+MASKED_FIELDS = ("input", "output", "metadata")
 
 
 def _string_leaves(node, refs):
@@ -217,11 +219,11 @@ class DlpMasker:
         for (container, key), masked_text in zip(small_refs, masked):
             container[key] = masked_text
 
-    def _collect_nl_refs(self, container, refs):
-        """Add string-leaf refs for the natural-language fields of `container`.
-        A NL field that is itself a string is one leaf; a nested input/output
-        (dict/list) contributes all of its string leaves."""
-        for key in NL_FIELDS:
+    def _collect_mask_refs(self, container, refs):
+        """Add string-leaf refs for the MASKED_FIELDS of `container`. A field that
+        is itself a string is one leaf; a nested field (dict/list) contributes all
+        of its string leaves."""
+        for key in MASKED_FIELDS:
             value = container.get(key)
             if isinstance(value, str):
                 refs.append((container, key))
@@ -229,22 +231,22 @@ class DlpMasker:
                 _string_leaves(value, refs)
 
     def mask_record(self, record):
-        """Keep the whole trace intact; DLP-mask ONLY the natural-language fields
-        (`input`/`output` on the trace and on each observation).
+        """Keep the whole trace intact; DLP-mask only `input`, `output`, and
+        `metadata` (on the trace and on each observation).
 
-        Every other field — ids, timestamps, `userId`, `metadata`, `tags`, costs,
-        type/name — is preserved AS-IS (not masked, not dropped). Detected PII in
-        the NL fields is replaced with `[INFO_TYPE]`. Masking is DLP-based and
+        Every other field — ids, timestamps, `userId`, `tags`, costs, type/name —
+        is preserved AS-IS (not masked, not dropped). Detected PII in the masked
+        fields is replaced with `[INFO_TYPE]`. Masking is DLP-based and
         probabilistic, so the result is reduced-sensitivity data, not a guarantee
-        of zero PII; any PII that lives outside input/output is passed through
-        unchanged."""
+        of zero PII; any PII that lives outside the masked fields is passed
+        through unchanged."""
         refs = []
-        self._collect_nl_refs(record, refs)
+        self._collect_mask_refs(record, refs)
         observations = record.get("observations")
         if isinstance(observations, list):
             for obs in observations:
                 if isinstance(obs, dict):
-                    self._collect_nl_refs(obs, refs)
+                    self._collect_mask_refs(obs, refs)
         self._mask_refs(refs)
         return record
 

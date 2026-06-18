@@ -7,6 +7,15 @@ locals {
   state_bucket_name  = "${var.name_prefix}-state-${data.google_project.this.number}"
   dlp_parent         = "projects/${var.project_id}/locations/${var.region}"
 
+  # Canonical billing-grouping labels. merge() places these last so they ALWAYS win
+  # over var.labels — a customer customizing/injecting labels can't drop the billing
+  # dimension. Filter Cloud Billing on label.component=kota-pii-masking.
+  billing_labels = {
+    component  = "kota-pii-masking" # canonical billing filter key
+    deployment = var.name_prefix    # distinguishes multiple deployments in one project
+  }
+  common_labels = merge(var.labels, local.billing_labels)
+
   # Slug-keyed map for looking up each project's (sensitive) keys.
   langfuse_projects = { for p in var.langfuse_projects : p.name => p }
 
@@ -51,7 +60,7 @@ resource "google_storage_bucket" "masked" {
   location                    = var.region
   uniform_bucket_level_access = true
   force_destroy               = false
-  labels                      = var.labels
+  labels                      = local.common_labels
 
   depends_on = [google_project_service.required]
 }
@@ -63,7 +72,7 @@ resource "google_storage_bucket" "state" {
   location                    = var.region
   uniform_bucket_level_access = true
   force_destroy               = true
-  labels                      = var.labels
+  labels                      = local.common_labels
 
   depends_on = [google_project_service.required]
 }
@@ -149,7 +158,7 @@ resource "google_secret_manager_secret" "langfuse_public_key" {
   for_each  = local.langfuse_project_names
   secret_id = "${var.name_prefix}-langfuse-public-key-${each.key}"
   project   = var.project_id
-  labels    = var.labels
+  labels    = local.common_labels
   replication {
     auto {}
   }
@@ -166,7 +175,7 @@ resource "google_secret_manager_secret" "langfuse_secret_key" {
   for_each  = local.langfuse_project_names
   secret_id = "${var.name_prefix}-langfuse-secret-key-${each.key}"
   project   = var.project_id
-  labels    = var.labels
+  labels    = local.common_labels
   replication {
     auto {}
   }
@@ -240,7 +249,7 @@ resource "google_cloud_run_v2_job" "exporter" {
   project             = var.project_id
   location            = var.region
   deletion_protection = false
-  labels              = var.labels
+  labels              = local.common_labels
 
   template {
     template {

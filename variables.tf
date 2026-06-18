@@ -160,9 +160,15 @@ variable "exporter_memory" {
 
 variable "labels" {
   type        = map(string)
-  description = "Labels applied to created resources."
+  description = <<-EOT
+    Labels applied to every labelable resource (buckets, secrets, the Cloud Run job).
+    Put deploy-time / custom billing-grouping labels here, e.g. {cost-center="acme", team="ml"}
+    — deploy.sh injects these from LABELS="key=value,...". The module also sets reserved
+    labels component=kota-pii-masking and deployment=<name_prefix>, which always win over
+    any same-named entry here (see local.common_labels). NOTE: DLP templates, Cloud Scheduler,
+    and service accounts cannot carry labels (no provider support).
+  EOT
   default = {
     managed-by = "terraform"
-    component  = "kota-pii-masking"
   }
 }

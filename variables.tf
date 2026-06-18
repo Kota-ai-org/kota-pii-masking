@@ -35,22 +35,42 @@ variable "name_prefix" {
   }
 }
 
-variable "langfuse_host" {
-  type        = string
-  description = "Langfuse API base URL (e.g. https://us.cloud.langfuse.com, https://cloud.langfuse.com, or your self-hosted host)."
-  default     = "https://us.cloud.langfuse.com"
-}
+variable "langfuse_projects" {
+  description = <<-EOT
+    Langfuse projects to export. Each project gets its own Secret Manager key
+    pair, its own watermark, and its own output subdir (exports/<name>/) in the
+    single shared masked bucket. Kota reads the one bucket and separates traces
+    by prefix.
 
-variable "langfuse_public_key" {
-  type        = string
-  description = "Langfuse public API key (pk-lf-...). Stored in Secret Manager and injected into the exporter job."
-  sensitive   = true
-}
+    Each `name` is a slug used in resource names, the output prefix, and the
+    env-var the exporter reads — keep it short, lowercase, hyphenated.
+    `host` is per-project and optional (defaults to Langfuse US cloud); set it to
+    https://cloud.langfuse.com for EU or to your self-hosted base URL.
+  EOT
+  type = list(object({
+    name       = string
+    public_key = string
+    secret_key = string
+    host       = optional(string, "https://us.cloud.langfuse.com")
+  }))
+  sensitive = true
 
-variable "langfuse_secret_key" {
-  type        = string
-  description = "Langfuse secret API key (sk-lf-...). Stored in Secret Manager and injected into the exporter job."
-  sensitive   = true
+  validation {
+    condition     = length(var.langfuse_projects) > 0
+    error_message = "langfuse_projects must contain at least one project."
+  }
+  validation {
+    condition     = alltrue([for p in var.langfuse_projects : can(regex("^[a-z0-9][a-z0-9-]*$", p.name))])
+    error_message = "Each project name must match ^[a-z0-9][a-z0-9-]*$ (lowercase alphanumeric and hyphens, starting alphanumeric)."
+  }
+  validation {
+    condition     = alltrue([for p in var.langfuse_projects : length(p.name) <= 30])
+    error_message = "Each project name must be at most 30 characters (keeps Secret Manager secret ids within limits)."
+  }
+  validation {
+    condition     = length(distinct([for p in var.langfuse_projects : p.name])) == length(var.langfuse_projects)
+    error_message = "Project names must be unique."
+  }
 }
 
 variable "schedule_cron" {
@@ -106,6 +126,36 @@ variable "dlp_max_rpm" {
     condition     = var.dlp_max_rpm >= 1 && var.dlp_max_rpm <= 10000
     error_message = "dlp_max_rpm must be between 1 and 10000."
   }
+}
+
+variable "export_chunk_size" {
+  type        = number
+  description = "Records masked, written, and checkpointed per chunk. The job writes one masked object and advances the watermark per chunk, so this caps peak memory regardless of backlog size."
+  default     = 200
+}
+
+variable "max_records_per_run" {
+  type        = number
+  description = "Per-run cap on records processed per project (0 = unlimited). Bounds each invocation under the Cloud Run job timeout; the watermark resumes the remainder on the next run. Set this for very large backlogs."
+  default     = 0
+}
+
+variable "dlp_timeout_seconds" {
+  type        = number
+  description = "Per-call deadline (seconds) for Cloud DLP requests. A slow/stuck call raises DeadlineExceeded and is retried+checkpointed instead of hanging the run."
+  default     = 120
+}
+
+variable "exporter_cpu" {
+  type        = string
+  description = "CPU for the exporter Cloud Run job container (e.g. \"1\", \"2\")."
+  default     = "1"
+}
+
+variable "exporter_memory" {
+  type        = string
+  description = "Memory for the exporter Cloud Run job container. The job holds a run's pulled traces in memory before writing; large/busy projects need more. Raise (e.g. \"2Gi\", \"4Gi\") if runs are OOM-killed. Must respect Cloud Run's CPU/memory ratios (cpu \"1\" allows up to 4Gi)."
+  default     = "1Gi"
 }
 
 variable "labels" {

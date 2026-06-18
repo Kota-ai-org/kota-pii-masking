@@ -4,10 +4,9 @@
 # environment variables and you don't need this file at all. Use this only if you
 # prefer the manual `tofu apply` path (README "Advanced").
 #
-# Copy to terraform.tfvars and fill in. Do NOT put Langfuse keys here — pass them
-# as environment variables so they never touch disk or version control:
-#   export TF_VAR_langfuse_public_key=pk-lf-...
-#   export TF_VAR_langfuse_secret_key=sk-lf-...
+# Copy to terraform.tfvars and fill in. Do NOT put Langfuse keys here — the
+# Langfuse projects (which carry the keys) go in their own gitignored file:
+# copy langfuse_projects.auto.tfvars.example to langfuse_projects.auto.tfvars.
 
 project_id = "<YOUR_GCP_PROJECT_ID>"
 region     = "<REGION>"                # e.g. europe-west1, us-central1
@@ -18,7 +17,8 @@ kota_sa_email = "<provided by Kota>"
 # Digest-pinned exporter image. scripts/build_image.sh prints this value.
 exporter_image = "<REGION>-docker.pkg.dev/<YOUR_PROJECT>/kota-pii-exporter/exporter@sha256:<DIGEST>"
 
-langfuse_host = "https://us.cloud.langfuse.com"
+# Langfuse projects (keys) live in langfuse_projects.auto.tfvars — see
+# langfuse_projects.auto.tfvars.example. Each project's `host` is set there.
 
 # Optional — deploy the hourly cron paused so you can review the dry-run first.
 scheduler_paused = true

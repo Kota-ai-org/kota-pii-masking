@@ -9,13 +9,15 @@
 #   REGION          region (e.g. us-central1, europe-west1)
 #   KOTA_SA_EMAIL   Kota's service account email (provided by Kota)
 #
-# Langfuse credentials (sensitive) — provide EITHER way:
-#   - export TF_VAR_langfuse_public_key / TF_VAR_langfuse_secret_key, OR
-#   - leave them unset and this script prompts (silent, no echo, no history).
+# Langfuse projects (sensitive) — provide the langfuse_projects list EITHER way:
+#   - create langfuse_projects.auto.tfvars from langfuse_projects.auto.tfvars.example
+#     (auto-loaded by tofu; gitignored via *.tfvars), OR
+#   - export TF_VAR_langfuse_projects as a JSON value (e.g. in CI).
+# Each project = {name, public_key, secret_key, host?}; keys go to Secret Manager,
+# never to the image, tfstate, or shell history.
 #
 # Optional env:
 #   NAME_PREFIX       resource name prefix (default: kota-pii)
-#   LANGFUSE_HOST     Langfuse API base (default: https://us.cloud.langfuse.com)
 #   SCHEDULER_PAUSED  =true to deploy the hourly cron PAUSED (review the dry-run,
 #                     then unpause). Default: live (module default).
 #   AUTO_APPROVE=1    skip the interactive apply confirmation
@@ -28,22 +30,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${KOTA_SA_EMAIL:?set KOTA_SA_EMAIL (provided by Kota)}"
 NAME_PREFIX="${NAME_PREFIX:-kota-pii}"
 
-# --- Langfuse keys: env, else interactive silent prompt -----------------------
-if [ -z "${TF_VAR_langfuse_public_key:-}" ]; then
-  if [ -t 0 ]; then
-    read -r -p "Langfuse public key (pk-lf-...): " TF_VAR_langfuse_public_key
-  else
-    echo "ERROR: set TF_VAR_langfuse_public_key (no TTY to prompt)." >&2; exit 1
-  fi
+# --- Langfuse projects: require a tfvars file or TF_VAR_langfuse_projects ------
+# The list is sensitive and structured, so it isn't prompted. Supply it via a
+# gitignored *.auto.tfvars file (preferred) or the TF_VAR env (CI).
+if [ ! -f "$HERE/langfuse_projects.auto.tfvars" ] \
+   && [ -z "${TF_VAR_langfuse_projects:-}" ]; then
+  echo "ERROR: no Langfuse projects configured." >&2
+  echo "  Create langfuse_projects.auto.tfvars (copy langfuse_projects.auto.tfvars.example)," >&2
+  echo "  or export TF_VAR_langfuse_projects as a JSON value." >&2
+  exit 1
 fi
-if [ -z "${TF_VAR_langfuse_secret_key:-}" ]; then
-  if [ -t 0 ]; then
-    read -r -s -p "Langfuse secret key (sk-lf-...): " TF_VAR_langfuse_secret_key; echo
-  else
-    echo "ERROR: set TF_VAR_langfuse_secret_key (no TTY to prompt)." >&2; exit 1
-  fi
-fi
-export TF_VAR_langfuse_public_key TF_VAR_langfuse_secret_key
 
 # --- Step 1: build image in the customer project, capture the digest ----------
 echo "== building exporter image (Cloud Build, ~1-3 min) ==" >&2
@@ -59,7 +55,6 @@ export TF_VAR_region="$REGION"
 export TF_VAR_kota_sa_email="$KOTA_SA_EMAIL"
 export TF_VAR_name_prefix="$NAME_PREFIX"
 export TF_VAR_exporter_image="$DIGEST"
-[ -n "${LANGFUSE_HOST:-}" ] && export TF_VAR_langfuse_host="$LANGFUSE_HOST"
 [ -n "${SCHEDULER_PAUSED:-}" ] && export TF_VAR_scheduler_paused="$SCHEDULER_PAUSED"
 
 tofu -chdir="$HERE" init -input=false

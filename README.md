@@ -66,12 +66,12 @@ Then follow the steps below. Questions at any point: **roee@kota-ai.com**.
 
 Everything runs in **your** project. The module creates:
 
-- a **masked bucket** (the only thing Kota reads),
-- a private **state bucket** (watermark only — Kota never reads it),
+- a **masked bucket** (the only thing Kota reads), one subdir per Langfuse project,
+- a private **state bucket** (per-project watermarks — Kota never reads it),
 - a **Cloud Run job** + **Cloud Scheduler** cron that does the masking,
 - two **Cloud DLP templates** you own and can tune anytime,
 - a dedicated **reader service account** Kota impersonates,
-- your **Langfuse keys** stored in **Secret Manager** (never in code, image, or logs).
+- your **Langfuse keys** (one pair per project) stored in **Secret Manager** (never in code, image, or logs).
 
 ## 3. Security model at a glance
 
@@ -97,7 +97,7 @@ Everything runs in **your** project. The module creates:
 
 - A GCP project with billing enabled.
 - OpenTofu/Terraform ≥ 1.5, `gcloud` CLI authenticated to the project.
-- A Langfuse project API key pair (public `pk-lf-...` + secret `sk-lf-...`).
+- One or more Langfuse project API key pairs (public `pk-lf-...` + secret `sk-lf-...`) — one pair per Langfuse project you want masked.
 - The deploying identity needs rights to create buckets, service accounts, IAM
   bindings, DLP templates, secrets, a Cloud Run job, and a Cloud Scheduler job —
   plus, for the one-time image build, `cloudbuild.builds.editor` +
@@ -141,11 +141,21 @@ delivered by an outbound push that places no Kota identity in your project.
 
 ### Step 1 — deploy (one command)
 
-```bash
-# Langfuse keys are sensitive — export them, or omit and the script prompts silently.
-export TF_VAR_langfuse_public_key=pk-lf-...
-export TF_VAR_langfuse_secret_key=sk-lf-...
+First, list your Langfuse projects (and their keys) in a gitignored tfvars file:
 
+```bash
+cp langfuse_projects.auto.tfvars.example langfuse_projects.auto.tfvars
+# edit it — one entry per Langfuse project:
+#   langfuse_projects = [
+#     { name = "support-bot", public_key = "pk-lf-...", secret_key = "sk-lf-...",
+#       host = "https://us.cloud.langfuse.com" },
+#     { name = "sales-agent", public_key = "pk-lf-...", secret_key = "sk-lf-..." },
+#   ]
+```
+
+Then deploy:
+
+```bash
 PROJECT=<YOUR_PROJECT> \
 REGION=<REGION> \
 KOTA_SA_EMAIL=<KOTA_SA_EMAIL> \   # provided by Kota in onboarding
@@ -153,13 +163,24 @@ SCHEDULER_PAUSED=true \
 ./deploy.sh
 ```
 
+> **Per-project `host`.** Each project's `host` must match the region of *that*
+> project's key pair. US: `https://us.cloud.langfuse.com` (default if omitted).
+> EU: `https://cloud.langfuse.com`. Self-hosted: your own base URL. A mismatched
+> host authenticates against the wrong region and returns no traces.
+
+> **Multiple projects, one bucket.** Every project's masked traces land in the
+> **same** masked bucket under its own subdir (`exports/<name>/`), so Kota still
+> only needs the single `(masked_bucket, reader_sa)` pair. Add or remove projects
+> later by editing the list and re-running `deploy.sh`.
+
 `deploy.sh` builds the exporter image **in your project** (Cloud Build, ~1–3 min),
 captures its immutable `@sha256` digest, runs `tofu apply` pinned to that digest,
 and prints the two values you send back to Kota. `SCHEDULER_PAUSED=true` keeps the
 cron paused so you can review the dry-run first (Section 6), then unpause.
 
-> The keys flow **only** to Secret Manager and are injected into the job at
-> runtime — never written to the image, the tfvars, or your shell history.
+> The keys flow **only** to Secret Manager (one secret pair per project) and are
+> injected into the job at runtime — never written to the image or your shell
+> history. The `*.auto.tfvars` file holding them is gitignored.
 
 ### Step 2 — hand two values back to Kota
 
@@ -179,11 +200,15 @@ traces from your Langfuse API and shows DLP detections + a masked before/after
 preview (raw text is never printed). Your team signs off, then you unpause.
 
 ```bash
+# One project (export its key pair):
 export LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=... LANGFUSE_HOST=...
 python scripts/dry_run.py \
   --project <YOUR_PROJECT> --region <REGION> \
   --inspect-template "$(tofu output -raw dlp_inspect_template_id)" \
   --deidentify-template "$(tofu output -raw dlp_deidentify_template_id)"
+
+# All configured projects at once: set LANGFUSE_PROJECTS (the [{name,host},...]
+# manifest) plus LF_PUB_<SLUG>/LF_SEC_<SLUG> per project, then add --all.
 ```
 
 **Go live** — unpause the cron:
@@ -197,9 +222,21 @@ tofu apply
 ## How it runs
 
 - **Schedule:** hourly (UTC) by default — set `schedule_cron` to change it.
-- **Incremental:** the job persists the last-exported timestamp in
-  `gs://<state-bucket>/watermark.json` and only pulls newer traces each run. The
-  first run looks back `initial_lookback_days` (default 1).
+- **Incremental, per project:** the job persists each project's last-exported
+  timestamp in `gs://<state-bucket>/watermark-<name>.json` and only pulls newer
+  traces each run. The first run for a project looks back `initial_lookback_days`
+  (default 1).
+- **Streamed in chunks, checkpointed:** within a run, traces are pulled
+  oldest-first and processed in chunks of `export_chunk_size` — each chunk is
+  masked, written as its own object, then the watermark is advanced. Peak memory
+  stays flat regardless of backlog, and an interrupted run (OOM/timeout/error)
+  keeps every committed chunk and resumes from its watermark next run. For very
+  large backlogs set `max_records_per_run` to bound each run; the cron drains the
+  rest over subsequent runs.
+- **Per-project fail-closed:** the single job exports every configured project in
+  one run. If one project errors, its watermark is left untouched (so its window
+  retries next run) and the **other projects still complete**. The run then exits
+  non-zero so the failure is visible/alertable.
 - **Stays under your DLP quota:** the job batches all of a trace's fields into one
   DLP request, self-throttles below `dlp_max_rpm` (default 500, under the 600/min
   region quota), and backs off + retries on quota errors. At high volume a run
@@ -244,9 +281,7 @@ and **no write access** to your project.
 | `region` | | `us-central1` | Region for buckets, job, and DLP templates (data residency). |
 | `kota_sa_email` | ✅ | — | Kota's reader identity (provided by Kota). |
 | `exporter_image` | ✅ | — | Set automatically by `deploy.sh` (digest-pinned). |
-| `langfuse_public_key` | ✅ | — | `pk-lf-...` (sensitive → Secret Manager). |
-| `langfuse_secret_key` | ✅ | — | `sk-lf-...` (sensitive → Secret Manager). |
-| `langfuse_host` | | `https://us.cloud.langfuse.com` | Langfuse API base URL. |
+| `langfuse_projects` | ✅ | — | List of Langfuse projects to export (sensitive → Secret Manager). Each is `{ name, public_key, secret_key, host }`. `name` is a slug (`^[a-z0-9][a-z0-9-]*$`, ≤30 chars, unique) used in the output subdir `exports/<name>/`; `host` is optional per project (default `https://us.cloud.langfuse.com` — EU: `https://cloud.langfuse.com`, or self-hosted). See `langfuse_projects.auto.tfvars.example`. |
 | `name_prefix` | | `kota-pii` | Prefix for all resource names. |
 | `schedule_cron` | | `0 * * * *` | Cron (UTC) for the exporter. |
 | `initial_lookback_days` | | `1` | First-run lookback when no watermark exists. |
@@ -254,6 +289,11 @@ and **no write access** to your project.
 | `dlp_info_types` | | common PII set | DLP infoTypes to detect + replace. |
 | `dlp_min_likelihood` | | `LIKELY` | Minimum match confidence to act on. |
 | `dlp_max_rpm` | | `500` | Client-side DLP requests/min ceiling. The job self-throttles below this and backs off on quota errors. |
+| `dlp_timeout_seconds` | | `120` | Per-call DLP deadline. A stuck call raises `DeadlineExceeded` → retried/checkpointed instead of hanging. |
+| `export_chunk_size` | | `200` | Records masked + written + checkpointed per chunk. Caps peak memory regardless of backlog. |
+| `max_records_per_run` | | `0` | Per-run record cap per project (0 = unlimited). Bounds a run under the job timeout; watermark resumes the rest next run. Set for very large backlogs. |
+| `exporter_cpu` | | `"1"` | CPU for the exporter job container. |
+| `exporter_memory` | | `"1Gi"` | Memory for the exporter job container. A run holds its pulled traces in memory before writing — raise (`"2Gi"`/`"4Gi"`) for large/busy projects if runs are OOM-killed. |
 
 ## Outputs
 
@@ -261,6 +301,7 @@ and **no write access** to your project.
 |---|---|
 | `masked_bucket_name` | **Send to Kota.** |
 | `reader_sa_email` | **Send to Kota.** |
+| `langfuse_project_names`, `masked_prefixes` | Per-project subdirs under the masked bucket (`exports/<name>/`). |
 | `masked_bucket_url`, `state_bucket_name` | Reference. |
 | `exporter_job_name`, `scheduler_job_name`, `exporter_sa_email` | Operate the job. |
 | `dlp_inspect_template_id`, `dlp_deidentify_template_id` | Used by the dry-run. |
@@ -271,15 +312,15 @@ and **no write access** to your project.
 
 `deploy.sh` just chains a build and an apply; you can run them yourself (e.g. to
 build in CI and apply elsewhere). Copy `terraform.tfvars.example` →
-`terraform.tfvars` for the non-secret values, and pass the Langfuse keys as env:
+`terraform.tfvars` for the non-secret values, and put the Langfuse projects in
+`langfuse_projects.auto.tfvars` (or pass `TF_VAR_langfuse_projects` as JSON):
 
 ```bash
 # 1. build the image in your project, capture the digest
 PROJECT=<YOUR_PROJECT> REGION=<REGION> ./scripts/build_image.sh
 #    prints: exporter_image = "REGION-docker.pkg.dev/<proj>/kota-pii-exporter/exporter@sha256:..."
 
-# 2. apply with that digest
-export TF_VAR_langfuse_public_key=pk-lf-... TF_VAR_langfuse_secret_key=sk-lf-...
+# 2. apply with that digest (langfuse_projects.auto.tfvars is auto-loaded)
 export TF_VAR_exporter_image="<digest from step 1>"
 tofu init && tofu apply
 ```

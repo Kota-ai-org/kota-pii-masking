@@ -42,6 +42,9 @@ FIELD_SIZE_LIMIT = 450_000
 MAX_TABLE_ROWS = 2000
 # Default client-side ceiling, below the 600/min-per-region DLP quota.
 DEFAULT_MAX_RPM = 500
+# Per-call DLP RPC deadline (seconds). Bounds a slow/stuck deidentify so it
+# raises DeadlineExceeded and is retried, instead of hanging the run silently.
+DEFAULT_DLP_TIMEOUT = 120
 
 # Trace-level fields whose values are masked (their full subtree).
 TRACE_TEXT_FIELDS = ("input", "output")
@@ -122,6 +125,7 @@ class DlpMasker:
         deidentify_template,
         rate_limiter,
         max_bytes=DEFAULT_MAX_BATCH_BYTES,
+        timeout=DEFAULT_DLP_TIMEOUT,
     ):
         self.client = client
         self.parent = parent
@@ -129,6 +133,7 @@ class DlpMasker:
         self.deidentify_template = deidentify_template
         self.rate_limiter = rate_limiter
         self.max_bytes = max_bytes
+        self.timeout = timeout
 
     @retry(
         stop=stop_after_attempt(6),
@@ -145,7 +150,8 @@ class DlpMasker:
                 "inspect_template_name": self.inspect_template,
                 "deidentify_template_name": self.deidentify_template,
                 "item": item,
-            }
+            },
+            timeout=self.timeout,
         )
 
     def _call(self, item):

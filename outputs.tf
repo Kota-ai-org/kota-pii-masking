@@ -13,6 +13,16 @@ output "reader_sa_email" {
   value       = google_service_account.reader.email
 }
 
+output "langfuse_project_names" {
+  description = "Configured Langfuse project subdir names. Masked traces land at gs://<masked_bucket>/exports/<name>/<ts>.jsonl."
+  value       = nonsensitive([for p in var.langfuse_projects : p.name])
+}
+
+output "masked_prefixes" {
+  description = "Per-project object prefixes Kota reads under the masked bucket."
+  value       = nonsensitive({ for p in var.langfuse_projects : p.name => "exports/${p.name}/" })
+}
+
 output "state_bucket_name" {
   description = "Private bucket holding the exporter watermark. Not shared with Kota."
   value       = google_storage_bucket.state.name

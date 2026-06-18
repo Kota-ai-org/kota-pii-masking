@@ -6,8 +6,12 @@ fields with your inspect template, and prints what would be detected plus how a
 record looks before/after de-identification. Nothing leaves your project;
 clear-text PII is never printed.
 
-Requires LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST in env (or
-flags) and ADC for the DLP API.
+Single project (default): set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY in env
+(host via --langfuse-host or LANGFUSE_HOST, defaults to Langfuse US cloud).
+
+All configured projects (--all): set LANGFUSE_PROJECTS to the same JSON manifest
+the exporter job uses ([{name, host}, ...]) plus LF_PUB_<SLUG> / LF_SEC_<SLUG>
+per project. Reports per project. ADC is required for the DLP API either way.
 
 Usage:
   python dry_run.py \
@@ -15,7 +19,8 @@ Usage:
     --region <REGION> \
     --inspect-template <projects/.../inspectTemplates/...> \
     --deidentify-template <projects/.../deidentifyTemplates/...> \
-    [--lookback-seconds 86400] [--max-traces 5]
+    [--langfuse-host https://us.cloud.langfuse.com] \
+    [--all] [--lookback-seconds 86400] [--max-traces 5]
 """
 
 import argparse
@@ -86,31 +91,22 @@ def _deidentify(dlp_client, parent, inspect_template, deidentify_template, text)
     return response.item.value
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--project", required=True)
-    ap.add_argument("--region", required=True)
-    ap.add_argument("--inspect-template", required=True)
-    ap.add_argument("--deidentify-template", required=True)
-    ap.add_argument("--lookback-seconds", type=int, default=86400)
-    ap.add_argument("--max-traces", type=int, default=5)
-    args = ap.parse_args()
+def _env_slug(name):
+    """Mirror the exporter / Terraform slug: upper(replace(name, "-", "_"))."""
+    return name.upper().replace("-", "_")
 
-    host = os.environ["LANGFUSE_HOST"]
-    public_key = os.environ["LANGFUSE_PUBLIC_KEY"]
-    secret_key = os.environ["LANGFUSE_SECRET_KEY"]
 
+def _run_report(dlp_client, parent, args, host, public_key, secret_key, label):
     records = asyncio.run(
         _pull(host, public_key, secret_key, args.lookback_seconds, args.max_traces)
     )
-    if not records:
-        print("No traces in the lookback window. Nothing to inspect.")
-        return
 
-    parent = _parent(args.project, args.region)
-    dlp_client = dlp_v2.DlpServiceClient(
-        client_options=co.ClientOptions(quota_project_id=args.project)
-    )
+    print("=" * 70)
+    print(f"KOTA PII-MASKING DRY-RUN FINDINGS REPORT{label}")
+    print("=" * 70)
+    if not records:
+        print("No traces in the lookback window. Nothing to inspect.\n")
+        return
 
     texts = [_transcript_text(r) for r in records]
     sample = "\n".join(texts)[:MAX_INSPECT_BYTES]
@@ -119,9 +115,6 @@ def main():
     by_type = Counter(f.info_type.name for f in findings)
     by_likelihood = Counter(f.likelihood.name for f in findings)
 
-    print("=" * 70)
-    print("KOTA PII-MASKING DRY-RUN FINDINGS REPORT")
-    print("=" * 70)
     print(f"Sampled {len(records)} trace(s) from {host}\n")
     print(f"Total PII findings: {len(findings)}\n")
     print("By infoType:")
@@ -144,7 +137,58 @@ def main():
     print("AFTER (masked, safe to share):")
     print(f"  {masked[:1000]}")
     print(
-        "\nRaw trace text is NOT printed. Review the masked form above before sign-off."
+        "\nRaw trace text is NOT printed. Review the masked form above before sign-off.\n"
+    )
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--region", required=True)
+    ap.add_argument("--inspect-template", required=True)
+    ap.add_argument("--deidentify-template", required=True)
+    ap.add_argument(
+        "--langfuse-host",
+        default=os.environ.get("LANGFUSE_HOST", "https://us.cloud.langfuse.com"),
+    )
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="Report every project in LANGFUSE_PROJECTS (keys from LF_PUB_/LF_SEC_).",
+    )
+    ap.add_argument("--lookback-seconds", type=int, default=86400)
+    ap.add_argument("--max-traces", type=int, default=5)
+    args = ap.parse_args()
+
+    parent = _parent(args.project, args.region)
+    dlp_client = dlp_v2.DlpServiceClient(
+        client_options=co.ClientOptions(quota_project_id=args.project)
+    )
+
+    if args.all:
+        projects = json.loads(os.environ["LANGFUSE_PROJECTS"])
+        for proj in projects:
+            name = proj["name"]
+            slug = _env_slug(name)
+            _run_report(
+                dlp_client,
+                parent,
+                args,
+                proj.get("host", args.langfuse_host),
+                os.environ[f"LF_PUB_{slug}"],
+                os.environ[f"LF_SEC_{slug}"],
+                f" — {name}",
+            )
+        return
+
+    _run_report(
+        dlp_client,
+        parent,
+        args,
+        args.langfuse_host,
+        os.environ["LANGFUSE_PUBLIC_KEY"],
+        os.environ["LANGFUSE_SECRET_KEY"],
+        "",
     )
 
 

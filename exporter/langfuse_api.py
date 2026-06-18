@@ -90,14 +90,16 @@ class LangfuseAPIClient:
         return response.json()
 
     async def iter_trace_summaries_since(
-        self, from_timestamp_seconds: int
+        self, from_timestamp_seconds: int, order_by: str = "timestamp.asc"
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield trace rows whose timestamp >= from_timestamp_seconds.
 
-        Pages forward through the list endpoint. Each yielded dict already
-        contains top-level `latency`, `totalCost`, `htmlPath`, `observations`
-        (as IDs), and `scores` (as IDs). Use `get_trace_details` to hydrate
-        observation/score objects.
+        Pages forward through the list endpoint, oldest-first by default
+        (`order_by="timestamp.asc"`). Ascending order lets a streaming consumer
+        checkpoint a watermark mid-run safely: once a trace is processed, every
+        earlier-or-equal trace has already been seen. Each yielded dict contains
+        top-level `latency`, `totalCost`, `htmlPath`, `observations` (as IDs),
+        and `scores` (as IDs); use `get_trace_details` to hydrate them.
         """
         from_ts = (
             _to_iso_z(from_timestamp_seconds) if from_timestamp_seconds > 0 else None
@@ -105,7 +107,11 @@ class LangfuseAPIClient:
 
         page = 1
         while True:
-            params: dict[str, Any] = {"page": page, "limit": _PAGE_SIZE}
+            params: dict[str, Any] = {
+                "page": page,
+                "limit": _PAGE_SIZE,
+                "orderBy": order_by,
+            }
             if from_ts is not None:
                 params["fromTimestamp"] = from_ts
 

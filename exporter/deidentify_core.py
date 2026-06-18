@@ -1,14 +1,16 @@
 """Core de-identify logic, shared by the Cloud Run job and the e2e check.
 
-Strategy: **keep the whole trace, mask the sensitive content**. Per record we
-walk the entire structure and DLP-mask every string value in place — detected
-PII is replaced with `[INFO_TYPE]` placeholders (replace_with_info_type), while
-non-PII strings (ids, timestamps, enum-like `type`/`name`, opaque keys) pass
-through unchanged. No field is dropped and structure is preserved, so Kota
-receives the full trace with only sensitive values scrubbed.
+Strategy: **keep the whole trace, mask only the natural-language fields**. Per
+record we DLP-mask the free-text transcript fields — `input`/`output` on the
+trace and on each observation (their full string-leaf subtree) — replacing
+detected PII with `[INFO_TYPE]` placeholders. Every other field (ids, timestamps,
+`userId`, `metadata`, `tags`, costs, type/name) is preserved AS-IS: not masked,
+not dropped. Kota receives the full trace with only the conversational content
+scrubbed.
 
-Because detection is DLP-based (probabilistic), the result is reduced-sensitivity
-data, not a guarantee of zero PII — tune the inspect template to your data.
+Because detection is DLP-based (probabilistic) and limited to input/output, the
+result is reduced-sensitivity data, not a guarantee of zero PII — any PII outside
+the NL fields is passed through unchanged. Tune the inspect template to your data.
 
 Rate-limit hardening: the job runs in the customer's project, where we cannot
 raise the Cloud DLP quota (600 requests/min per region). So `DlpMasker`
@@ -45,6 +47,9 @@ DEFAULT_MAX_RPM = 500
 # Per-call DLP RPC deadline (seconds). Bounds a slow/stuck deidentify so it
 # raises DeadlineExceeded and is retried, instead of hanging the run silently.
 DEFAULT_DLP_TIMEOUT = 120
+
+# Natural-language fields that are DLP-masked. Everything else is kept as-is.
+NL_FIELDS = ("input", "output")
 
 
 def _string_leaves(node, refs):
@@ -192,16 +197,14 @@ class DlpMasker:
         pieces = self._split_for_dlp(text)
         return "".join(self._mask_strings(pieces))
 
-    def _mask_leaves(self, value):
-        """Mask every string leaf in `value` in place, BATCHED into DLP table
-        calls (not one request per leaf). A leaf at/above max_bytes is split and
-        masked piecewise (see _mask_big_text) so it never exceeds DLP's per-item
-        content limit and never hangs the run."""
-        all_refs = []
-        _string_leaves(value, all_refs)
+    def _mask_refs(self, refs):
+        """Mask the string leaves referenced by `refs` (a list of (container,
+        key)) in place, BATCHED into DLP table calls (not one request per leaf).
+        A leaf at/above max_bytes is split and masked piecewise (see
+        _mask_big_text) so it never exceeds DLP's per-item limit or hangs."""
         small_refs = []
         small_texts = []
-        for container, key in all_refs:
+        for container, key in refs:
             text = container[key]
             if not text.strip():
                 continue
@@ -213,17 +216,37 @@ class DlpMasker:
         masked = self._mask_strings(small_texts)
         for (container, key), masked_text in zip(small_refs, masked):
             container[key] = masked_text
-        return value
+
+    def _collect_nl_refs(self, container, refs):
+        """Add string-leaf refs for the natural-language fields of `container`.
+        A NL field that is itself a string is one leaf; a nested input/output
+        (dict/list) contributes all of its string leaves."""
+        for key in NL_FIELDS:
+            value = container.get(key)
+            if isinstance(value, str):
+                refs.append((container, key))
+            elif isinstance(value, (dict, list)):
+                _string_leaves(value, refs)
 
     def mask_record(self, record):
-        """Keep the whole trace intact; DLP-mask every string value in it.
+        """Keep the whole trace intact; DLP-mask ONLY the natural-language fields
+        (`input`/`output` on the trace and on each observation).
 
-        Detected PII in each string leaf is replaced with `[INFO_TYPE]`; non-PII
-        strings (ids, timestamps, enum-like type/name, opaque keys) pass through
-        unchanged. No field is dropped and structure is preserved. Masking is
-        DLP-based/probabilistic, so the result is reduced-sensitivity data, not a
-        guarantee of zero PII."""
-        return self._mask_leaves(record)
+        Every other field — ids, timestamps, `userId`, `metadata`, `tags`, costs,
+        type/name — is preserved AS-IS (not masked, not dropped). Detected PII in
+        the NL fields is replaced with `[INFO_TYPE]`. Masking is DLP-based and
+        probabilistic, so the result is reduced-sensitivity data, not a guarantee
+        of zero PII; any PII that lives outside input/output is passed through
+        unchanged."""
+        refs = []
+        self._collect_nl_refs(record, refs)
+        observations = record.get("observations")
+        if isinstance(observations, list):
+            for obs in observations:
+                if isinstance(obs, dict):
+                    self._collect_nl_refs(obs, refs)
+        self._mask_refs(refs)
+        return record
 
     def mask_jsonl(self, raw_text):
         """De-identify a JSONL blob record-by-record, preserving order/trailing NL."""

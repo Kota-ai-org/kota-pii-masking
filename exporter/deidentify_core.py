@@ -1,21 +1,25 @@
 """Core de-identify logic, shared by the Cloud Run job and the e2e check.
 
-Strategy: targeted masking + projection. Per trace record we
-  1. DLP-mask only the free-text transcript fields — trace `input`/`output` and
-     each observation `input`/`output` — by serializing each field to text,
-     de-identifying it, and parsing it back (replace_with_info_type keeps it
-     valid JSON);
-  2. project the record down to the fields Kota's parser consumes, DROPPING the
-     non-transcript PII carriers entirely (`userId`, `tags`, raw `metadata`
-     except `agent_name`, usage/cost/model on observations).
+Strategy: **keep the whole trace, mask a fixed set of fields**. Per record we
+DLP-mask `input`, `output`, and `metadata` — on the trace and on each observation
+(their full string-leaf subtree) — replacing detected PII with `[INFO_TYPE]`
+placeholders. Every other field (ids, timestamps, `userId`, `tags`, costs,
+type/name) is preserved AS-IS: not masked, not dropped. Kota receives the full
+trace with only those fields scrubbed.
+
+Because detection is DLP-based (probabilistic) and limited to the masked fields,
+the result is reduced-sensitivity data, not a guarantee of zero PII — any PII
+outside those fields is passed through unchanged. Tune the inspect template to
+your data.
 
 Rate-limit hardening: the job runs in the customer's project, where we cannot
 raise the Cloud DLP quota (600 requests/min per region). So `DlpMasker`
-  - **batches** every maskable field of a record into ONE DLP table request
-    (instead of one request per field), cutting call volume ~10-20x;
+  - **batches** a record's string leaves into table requests (bounded by row
+    count and bytes) instead of one request per value;
+  - **splits** any single oversized string on safe boundaries so it never
+    exceeds DLP's per-item limit or hangs the run;
   - **rate-limits** every request to stay under the quota (`RateLimiter`);
-  - **backs off** on `RESOURCE_EXHAUSTED`/transient errors and retries, so a
-    throttled run paces itself and completes rather than failing closed.
+  - **backs off** on `RESOURCE_EXHAUSTED`/transient errors and retries.
 
 Pure DLP logic, no storage deps, so it is directly testable.
 """
@@ -36,41 +40,18 @@ from tenacity import (
 )
 
 DEFAULT_MAX_BATCH_BYTES = 200_000
-# A serialized field at/above this is chunked leaf-by-leaf instead of whole.
-FIELD_SIZE_LIMIT = 450_000
 # Max rows per DLP table request (DLP allows 50,000 values; stay well under).
 MAX_TABLE_ROWS = 2000
 # Default client-side ceiling, below the 600/min-per-region DLP quota.
 DEFAULT_MAX_RPM = 500
+# Per-call DLP RPC deadline (seconds). Bounds a slow/stuck deidentify so it
+# raises DeadlineExceeded and is retried, instead of hanging the run silently.
+DEFAULT_DLP_TIMEOUT = 120
 
-# Trace-level fields whose values are masked (their full subtree).
-TRACE_TEXT_FIELDS = ("input", "output")
-# Observation-level fields that are masked.
-OBSERVATION_TEXT_FIELDS = ("input", "output")
-# Observation fields kept after projection (masked io + non-PII structure).
-OBSERVATION_KEEP_FIELDS = (
-    "input",
-    "output",
-    "startTime",
-    "endTime",
-    "type",
-    "name",
-)
-# Trace fields dropped by projection — non-transcript PII carriers / bloat.
-TRACE_DROP_FIELDS = (
-    "userId",
-    "tags",
-    "release",
-    "version",
-    "public",
-    "bookmarked",
-    "scores",
-    "totalCost",
-    "htmlPath",
-    "externalId",
-)
-# Metadata keys preserved (everything else in metadata is dropped).
-METADATA_KEEP_KEYS = ("agent_name",)
+# Fields that are DLP-masked (the free-text transcript plus metadata, which can
+# carry PII). Masked wherever they appear (trace + observations). Every other
+# field is kept as-is.
+MASKED_FIELDS = ("input", "output", "metadata")
 
 
 def _string_leaves(node, refs):
@@ -122,6 +103,7 @@ class DlpMasker:
         deidentify_template,
         rate_limiter,
         max_bytes=DEFAULT_MAX_BATCH_BYTES,
+        timeout=DEFAULT_DLP_TIMEOUT,
     ):
         self.client = client
         self.parent = parent
@@ -129,6 +111,7 @@ class DlpMasker:
         self.deidentify_template = deidentify_template
         self.rate_limiter = rate_limiter
         self.max_bytes = max_bytes
+        self.timeout = timeout
 
     @retry(
         stop=stop_after_attempt(6),
@@ -145,97 +128,126 @@ class DlpMasker:
                 "inspect_template_name": self.inspect_template,
                 "deidentify_template_name": self.deidentify_template,
                 "item": item,
-            }
+            },
+            timeout=self.timeout,
         )
 
     def _call(self, item):
         self.rate_limiter.acquire()
         return self._deidentify(item)
 
-    def _deidentify_text(self, text):
-        if not text.strip():
-            return text
-        return self._call({"value": text}).item.value
+    def _split_for_dlp(self, text):
+        """Split `text` into pieces each < max_bytes, such that ''.join(pieces)
+        reconstructs the original exactly. Splits on line boundaries — PII tokens
+        never span a newline, so masking pieces independently can't miss PII at a
+        boundary. A single line larger than max_bytes is hard-split by character
+        (rare; the only place a token could straddle a boundary)."""
+        pieces = []
+        cur = []
+        cur_bytes = 0
+        for line in text.splitlines(keepends=True):
+            line_bytes = len(line.encode("utf-8"))
+            if line_bytes >= self.max_bytes:
+                if cur:
+                    pieces.append("".join(cur))
+                    cur, cur_bytes = [], 0
+                seg = []
+                seg_bytes = 0
+                for ch in line:
+                    cb = len(ch.encode("utf-8"))
+                    if seg and seg_bytes + cb > self.max_bytes:
+                        pieces.append("".join(seg))
+                        seg, seg_bytes = [], 0
+                    seg.append(ch)
+                    seg_bytes += cb
+                if seg:
+                    pieces.append("".join(seg))
+                continue
+            if cur and cur_bytes + line_bytes > self.max_bytes:
+                pieces.append("".join(cur))
+                cur, cur_bytes = [], 0
+            cur.append(line)
+            cur_bytes += line_bytes
+        if cur:
+            pieces.append("".join(cur))
+        return pieces
 
-    def _mask_by_leaves(self, value):
-        """Fallback for oversized fields: mask each string leaf individually."""
-        refs = []
-        _string_leaves(value, refs)
-        for container, key in refs:
-            leaf = container[key]
-            if leaf.strip():
-                container[key] = self._deidentify_text(leaf)
-        return value
-
-    def _collect_field(self, container, key, slots):
-        """Queue a field for batched masking, or mask oversized fields inline."""
-        value = container.get(key)
-        if value is None:
-            return
-        text = json.dumps(value, ensure_ascii=False)
-        if len(text.encode("utf-8")) >= FIELD_SIZE_LIMIT:
-            container[key] = self._mask_by_leaves(value)
-            return
-        slots.append((container, key, value, text))
-
-    def _mask_slots(self, slots):
-        """Mask queued fields in table batches bounded by row count and bytes."""
+    def _mask_strings(self, texts):
+        """Mask a list of strings (each < max_bytes) via DLP table calls batched
+        by row count and bytes. Returns the masked strings in input order."""
+        masked = []
         index = 0
-        while index < len(slots):
+        while index < len(texts):
             chunk = []
             chunk_bytes = 0
-            while index < len(slots) and len(chunk) < MAX_TABLE_ROWS:
-                text = slots[index][3]
-                text_bytes = len(text.encode("utf-8"))
-                if chunk and chunk_bytes + text_bytes > self.max_bytes:
+            while index < len(texts) and len(chunk) < MAX_TABLE_ROWS:
+                tb = len(texts[index].encode("utf-8"))
+                if chunk and chunk_bytes + tb > self.max_bytes:
                     break
-                chunk.append(slots[index])
-                chunk_bytes += text_bytes
+                chunk.append(texts[index])
+                chunk_bytes += tb
                 index += 1
-            self._mask_chunk(chunk)
+            rows = [{"values": [{"string_value": t}]} for t in chunk]
+            item = {"table": {"headers": [{"name": "v"}], "rows": rows}}
+            masked_rows = self._call(item).item.table.rows
+            masked.extend(r.values[0].string_value for r in masked_rows)
+        return masked
 
-    def _mask_chunk(self, chunk):
-        rows = [{"values": [{"string_value": text}]} for (_, _, _, text) in chunk]
-        item = {"table": {"headers": [{"name": "v"}], "rows": rows}}
-        masked_rows = self._call(item).item.table.rows
-        for (container, key, value, _text), masked_row in zip(chunk, masked_rows):
-            masked_text = masked_row.values[0].string_value
-            try:
-                container[key] = json.loads(masked_text)
-            except json.JSONDecodeError:
-                container[key] = self._mask_by_leaves(value)
+    def _mask_big_text(self, text):
+        """Mask a single oversized string by splitting it into sub-max_bytes
+        pieces (on safe boundaries), masking them batched, and rejoining."""
+        pieces = self._split_for_dlp(text)
+        return "".join(self._mask_strings(pieces))
+
+    def _mask_refs(self, refs):
+        """Mask the string leaves referenced by `refs` (a list of (container,
+        key)) in place, BATCHED into DLP table calls (not one request per leaf).
+        A leaf at/above max_bytes is split and masked piecewise (see
+        _mask_big_text) so it never exceeds DLP's per-item limit or hangs."""
+        small_refs = []
+        small_texts = []
+        for container, key in refs:
+            text = container[key]
+            if not text.strip():
+                continue
+            if len(text.encode("utf-8")) >= self.max_bytes:
+                container[key] = self._mask_big_text(text)
+            else:
+                small_refs.append((container, key))
+                small_texts.append(text)
+        masked = self._mask_strings(small_texts)
+        for (container, key), masked_text in zip(small_refs, masked):
+            container[key] = masked_text
+
+    def _collect_mask_refs(self, container, refs):
+        """Add string-leaf refs for the MASKED_FIELDS of `container`. A field that
+        is itself a string is one leaf; a nested field (dict/list) contributes all
+        of its string leaves."""
+        for key in MASKED_FIELDS:
+            value = container.get(key)
+            if isinstance(value, str):
+                refs.append((container, key))
+            elif isinstance(value, (dict, list)):
+                _string_leaves(value, refs)
 
     def mask_record(self, record):
-        """Mask transcript fields and project away non-transcript PII carriers."""
-        slots = []
-        for key in TRACE_TEXT_FIELDS:
-            self._collect_field(record, key, slots)
+        """Keep the whole trace intact; DLP-mask only `input`, `output`, and
+        `metadata` (on the trace and on each observation).
 
+        Every other field — ids, timestamps, `userId`, `tags`, costs, type/name —
+        is preserved AS-IS (not masked, not dropped). Detected PII in the masked
+        fields is replaced with `[INFO_TYPE]`. Masking is DLP-based and
+        probabilistic, so the result is reduced-sensitivity data, not a guarantee
+        of zero PII; any PII that lives outside the masked fields is passed
+        through unchanged."""
+        refs = []
+        self._collect_mask_refs(record, refs)
         observations = record.get("observations")
         if isinstance(observations, list):
             for obs in observations:
                 if isinstance(obs, dict):
-                    for key in OBSERVATION_TEXT_FIELDS:
-                        self._collect_field(obs, key, slots)
-
-        self._mask_slots(slots)
-
-        if isinstance(observations, list):
-            record["observations"] = [
-                {k: obs[k] for k in OBSERVATION_KEEP_FIELDS if k in obs}
-                for obs in observations
-                if isinstance(obs, dict)
-            ]
-
-        for key in TRACE_DROP_FIELDS:
-            record.pop(key, None)
-
-        metadata = record.get("metadata")
-        if isinstance(metadata, dict):
-            record["metadata"] = {
-                k: metadata[k] for k in METADATA_KEEP_KEYS if k in metadata
-            }
-
+                    self._collect_mask_refs(obs, refs)
+        self._mask_refs(refs)
         return record
 
     def mask_jsonl(self, raw_text):

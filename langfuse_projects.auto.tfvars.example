@@ -1,0 +1,23 @@
+# Copy to langfuse_projects.auto.tfvars and fill in real keys.
+# The real file matches *.tfvars in .gitignore, so it is never committed.
+# tofu auto-loads *.auto.tfvars, so deploy.sh picks it up with no extra flags.
+#
+# One entry per Langfuse project. `name` is a slug (lowercase, hyphens, <=30
+# chars, unique) used in resource names and the output subdir exports/<name>/.
+# `host` is optional and defaults to https://us.cloud.langfuse.com — set it per
+# project for EU (https://cloud.langfuse.com) or a self-hosted base URL.
+
+langfuse_projects = [
+  {
+    name       = "support-bot"
+    public_key = "pk-lf-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    secret_key = "sk-lf-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    host       = "https://us.cloud.langfuse.com"
+  },
+  {
+    name       = "sales-agent"
+    public_key = "pk-lf-yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+    secret_key = "sk-lf-yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+    # host omitted -> defaults to https://us.cloud.langfuse.com
+  },
+]

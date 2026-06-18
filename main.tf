@@ -6,6 +6,19 @@ locals {
   masked_bucket_name = "${var.name_prefix}-masked-${data.google_project.this.number}"
   state_bucket_name  = "${var.name_prefix}-state-${data.google_project.this.number}"
   dlp_parent         = "projects/${var.project_id}/locations/${var.region}"
+
+  # Slug-keyed map for looking up each project's (sensitive) keys.
+  langfuse_projects = { for p in var.langfuse_projects : p.name => p }
+
+  # Project names are NOT secret; use this non-sensitive set for for_each
+  # (Terraform forbids sensitive values as for_each keys).
+  langfuse_project_names = nonsensitive(toset([for p in var.langfuse_projects : p.name]))
+
+  # Non-secret manifest the exporter loops over. Secrets are injected separately
+  # via per-project LF_PUB_<SLUG>/LF_SEC_<SLUG> env vars (secret_key_ref).
+  langfuse_manifest = nonsensitive(jsonencode([
+    for p in var.langfuse_projects : { name = p.name, host = p.host }
+  ]))
 }
 
 ###############################################################################
@@ -133,8 +146,10 @@ resource "google_data_loss_prevention_deidentify_template" "this" {
 ###############################################################################
 
 resource "google_secret_manager_secret" "langfuse_public_key" {
-  secret_id = "${var.name_prefix}-langfuse-public-key"
+  for_each  = local.langfuse_project_names
+  secret_id = "${var.name_prefix}-langfuse-public-key-${each.key}"
   project   = var.project_id
+  labels    = var.labels
   replication {
     auto {}
   }
@@ -142,13 +157,16 @@ resource "google_secret_manager_secret" "langfuse_public_key" {
 }
 
 resource "google_secret_manager_secret_version" "langfuse_public_key" {
-  secret      = google_secret_manager_secret.langfuse_public_key.id
-  secret_data = var.langfuse_public_key
+  for_each    = local.langfuse_project_names
+  secret      = google_secret_manager_secret.langfuse_public_key[each.key].id
+  secret_data = local.langfuse_projects[each.key].public_key
 }
 
 resource "google_secret_manager_secret" "langfuse_secret_key" {
-  secret_id = "${var.name_prefix}-langfuse-secret-key"
+  for_each  = local.langfuse_project_names
+  secret_id = "${var.name_prefix}-langfuse-secret-key-${each.key}"
   project   = var.project_id
+  labels    = var.labels
   replication {
     auto {}
   }
@@ -156,8 +174,9 @@ resource "google_secret_manager_secret" "langfuse_secret_key" {
 }
 
 resource "google_secret_manager_secret_version" "langfuse_secret_key" {
-  secret      = google_secret_manager_secret.langfuse_secret_key.id
-  secret_data = var.langfuse_secret_key
+  for_each    = local.langfuse_project_names
+  secret      = google_secret_manager_secret.langfuse_secret_key[each.key].id
+  secret_data = local.langfuse_projects[each.key].secret_key
 }
 
 ###############################################################################
@@ -201,14 +220,16 @@ resource "google_storage_bucket_iam_member" "exporter_state_writer" {
 }
 
 resource "google_secret_manager_secret_iam_member" "exporter_public_key" {
-  secret_id = google_secret_manager_secret.langfuse_public_key.secret_id
+  for_each  = local.langfuse_project_names
+  secret_id = google_secret_manager_secret.langfuse_public_key[each.key].secret_id
   project   = var.project_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.exporter.email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "exporter_secret_key" {
-  secret_id = google_secret_manager_secret.langfuse_secret_key.secret_id
+  for_each  = local.langfuse_project_names
+  secret_id = google_secret_manager_secret.langfuse_secret_key[each.key].secret_id
   project   = var.project_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.exporter.email}"
@@ -219,6 +240,7 @@ resource "google_cloud_run_v2_job" "exporter" {
   project             = var.project_id
   location            = var.region
   deletion_protection = false
+  labels              = var.labels
 
   template {
     template {
@@ -262,36 +284,60 @@ resource "google_cloud_run_v2_job" "exporter" {
           value = tostring(var.dlp_max_rpm)
         }
         env {
-          name  = "LANGFUSE_HOST"
-          value = var.langfuse_host
+          name  = "DLP_TIMEOUT"
+          value = tostring(var.dlp_timeout_seconds)
+        }
+        env {
+          name  = "EXPORT_CHUNK_SIZE"
+          value = tostring(var.export_chunk_size)
+        }
+        env {
+          name  = "MAX_RECORDS_PER_RUN"
+          value = tostring(var.max_records_per_run)
         }
         env {
           name  = "INITIAL_LOOKBACK_DAYS"
           value = tostring(var.initial_lookback_days)
         }
+
+        # Non-secret per-project manifest: [{name, host}, ...]. The exporter
+        # loops over this and reads each project's keys from LF_PUB_<SLUG> /
+        # LF_SEC_<SLUG>, where SLUG = upper(replace(name, "-", "_")).
         env {
-          name = "LANGFUSE_PUBLIC_KEY"
-          value_source {
-            secret_key_ref {
-              secret  = google_secret_manager_secret.langfuse_public_key.secret_id
-              version = "latest"
+          name  = "LANGFUSE_PROJECTS"
+          value = local.langfuse_manifest
+        }
+
+        # Per-project Langfuse keys, injected from Secret Manager at runtime.
+        dynamic "env" {
+          for_each = local.langfuse_project_names
+          content {
+            name = "LF_PUB_${upper(replace(env.key, "-", "_"))}"
+            value_source {
+              secret_key_ref {
+                secret  = google_secret_manager_secret.langfuse_public_key[env.key].secret_id
+                version = "latest"
+              }
             }
           }
         }
-        env {
-          name = "LANGFUSE_SECRET_KEY"
-          value_source {
-            secret_key_ref {
-              secret  = google_secret_manager_secret.langfuse_secret_key.secret_id
-              version = "latest"
+        dynamic "env" {
+          for_each = local.langfuse_project_names
+          content {
+            name = "LF_SEC_${upper(replace(env.key, "-", "_"))}"
+            value_source {
+              secret_key_ref {
+                secret  = google_secret_manager_secret.langfuse_secret_key[env.key].secret_id
+                version = "latest"
+              }
             }
           }
         }
 
         resources {
           limits = {
-            cpu    = "1"
-            memory = "512Mi"
+            cpu    = var.exporter_cpu
+            memory = var.exporter_memory
           }
         }
       }

@@ -164,13 +164,39 @@ class DlpMasker:
         return self._call({"value": text}).item.value
 
     def _mask_by_leaves(self, value):
-        """Fallback for oversized fields: mask each string leaf individually."""
-        refs = []
-        _string_leaves(value, refs)
-        for container, key in refs:
-            leaf = container[key]
-            if leaf.strip():
-                container[key] = self._deidentify_text(leaf)
+        """Fallback for oversized fields: mask each string leaf, but BATCHED into
+        DLP table calls (bounded by row count and bytes) rather than one call per
+        leaf. A field with thousands of leaves then costs a handful of requests
+        instead of thousands of serial round-trips. A single leaf at/above
+        max_bytes is sent on its own as a value request."""
+        all_refs = []
+        _string_leaves(value, all_refs)
+        refs = [(c, k) for (c, k) in all_refs if c[k].strip()]
+        index = 0
+        while index < len(refs):
+            chunk = []
+            chunk_bytes = 0
+            while index < len(refs) and len(chunk) < MAX_TABLE_ROWS:
+                container, key = refs[index]
+                text = container[key]
+                text_bytes = len(text.encode("utf-8"))
+                if not chunk and text_bytes >= self.max_bytes:
+                    # Oversized single leaf: mask alone, advance past it.
+                    container[key] = self._deidentify_text(text)
+                    index += 1
+                    break
+                if chunk and chunk_bytes + text_bytes > self.max_bytes:
+                    break
+                chunk.append((container, key, text))
+                chunk_bytes += text_bytes
+                index += 1
+            if not chunk:
+                continue
+            rows = [{"values": [{"string_value": t}]} for (_, _, t) in chunk]
+            item = {"table": {"headers": [{"name": "v"}], "rows": rows}}
+            masked_rows = self._call(item).item.table.rows
+            for (container, key, _text), masked_row in zip(chunk, masked_rows):
+                container[key] = masked_row.values[0].string_value
         return value
 
     def _collect_field(self, container, key, slots):

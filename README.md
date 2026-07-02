@@ -175,6 +175,25 @@ SCHEDULER_PAUSED=true \
 > EU: `https://cloud.langfuse.com`. Self-hosted: your own base URL. A mismatched
 > host authenticates against the wrong region and returns no traces.
 
+> **Host behind Cloudflare Access (or another authenticating proxy)?** Add
+> `extra_headers` to that project's entry — the exporter sends them on every
+> request. For a Cloudflare Access [service token](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/):
+>
+> ```hcl
+> { name = "internal-agent", public_key = "pk-lf-...", secret_key = "sk-lf-...",
+>   host = "https://langfuse.internal.example.com",
+>   extra_headers = {
+>     "CF-Access-Client-Id"     = "<client-id>.access"
+>     "CF-Access-Client-Secret" = "<client-secret>"
+>   } }
+> ```
+>
+> The headers are stored in Secret Manager and injected into the job at runtime
+> — like the API keys, they never land in the image, logs, or shell history.
+> Without them, Cloudflare blocks the request before Langfuse ever sees it.
+> Note: service tokens expire (default one year) — rotate by updating the tfvars
+> entry and re-running `deploy.sh`.
+
 > **Multiple projects, one bucket.** Every project's masked traces land in the
 > **same** masked bucket under its own subdir (`exports/<name>/`), so Kota still
 > only needs the single `(masked_bucket, reader_sa)` pair. Add or remove projects
@@ -328,7 +347,7 @@ and **no write access** to your project.
 | `region` | | `us-central1` | Region for buckets, job, and DLP templates (data residency). |
 | `kota_sa_email` | ✅ | — | Kota's reader identity (provided by Kota). |
 | `exporter_image` | ✅ | — | Set automatically by `deploy.sh` (digest-pinned). |
-| `langfuse_projects` | ✅ | — | List of Langfuse projects to export (sensitive → Secret Manager). Each is `{ name, public_key, secret_key, host }`. `name` is a slug (`^[a-z0-9][a-z0-9-]*$`, ≤30 chars, unique) used in the output subdir `exports/<name>/`; `host` is optional per project (default `https://us.cloud.langfuse.com` — EU: `https://cloud.langfuse.com`, or self-hosted). See `langfuse_projects.auto.tfvars.example`. |
+| `langfuse_projects` | ✅ | — | List of Langfuse projects to export (sensitive → Secret Manager). Each is `{ name, public_key, secret_key, host, extra_headers }`. `name` is a slug (`^[a-z0-9][a-z0-9-]*$`, ≤30 chars, unique) used in the output subdir `exports/<name>/`; `host` is optional per project (default `https://us.cloud.langfuse.com` — EU: `https://cloud.langfuse.com`, or self-hosted); `extra_headers` is an optional header map sent on every request for hosts behind an authenticating proxy (e.g. Cloudflare Access service tokens). See `langfuse_projects.auto.tfvars.example`. |
 | `name_prefix` | | `kota-pii` | Prefix for all resource names. |
 | `schedule_cron` | | `0 * * * *` | Cron (UTC) for the exporter. |
 | `initial_lookback_days` | | `1` | First-run lookback when no watermark exists. |

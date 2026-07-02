@@ -100,6 +100,9 @@ async def _stream_export(proj, masker, storage_client, masked_bucket, masked_pre
     slug = _project_env_slug(name)
     public_key = _env(f"LF_PUB_{slug}", required=True)
     secret_key = _env(f"LF_SEC_{slug}", required=True)
+    # Optional proxy headers (JSON object from Secret Manager), e.g. Cloudflare
+    # Access service-token credentials. Absent for most projects.
+    extra_headers = json.loads(_env(f"LF_HDR_{slug}", "{}"))
     state_object = _watermark_object(name)
 
     run_ts = int(time.time())
@@ -128,7 +131,9 @@ async def _stream_export(proj, masker, storage_client, masked_bucket, masked_pre
         written += len(chunk)
         chunk = []
 
-    async with LangfuseAPIClient(host, public_key, secret_key) as client:
+    async with LangfuseAPIClient(
+        host, public_key, secret_key, extra_headers=extra_headers
+    ) as client:
         async for summary in client.iter_trace_summaries_since(watermark):
             record = await client.get_trace_details(summary["id"])
             seconds = _trace_epoch_seconds(record)

@@ -49,12 +49,18 @@ class LangfuseAPIClient:
         host: str,
         public_key: str,
         secret_key: str,
+        extra_headers: Optional[dict[str, str]] = None,
     ) -> None:
+        # extra_headers rides on every request — needed when the host sits
+        # behind an authenticating proxy (e.g. Cloudflare Access service
+        # tokens: CF-Access-Client-Id / CF-Access-Client-Secret). Langfuse
+        # itself still authenticates via basic auth; the two are independent.
         self._host = host.rstrip("/")
+        headers = {"Accept": "application/json", **(extra_headers or {})}
         self._client = httpx.AsyncClient(
             base_url=self._host,
             auth=(public_key, secret_key),
-            headers={"Accept": "application/json"},
+            headers=headers,
             timeout=_REQUEST_TIMEOUT,
         )
 

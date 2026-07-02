@@ -6,6 +6,9 @@
 # chars, unique) used in resource names and the output subdir exports/<name>/.
 # `host` is optional and defaults to https://us.cloud.langfuse.com — set it per
 # project for EU (https://cloud.langfuse.com) or a self-hosted base URL.
+# `extra_headers` is optional — set it when the host sits behind an
+# authenticating proxy (e.g. Cloudflare Access service tokens); the headers are
+# sent on every request and stored in Secret Manager, never committed.
 
 langfuse_projects = [
   {
@@ -13,6 +16,18 @@ langfuse_projects = [
     public_key = "pk-lf-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     secret_key = "sk-lf-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     host       = "https://us.cloud.langfuse.com"
+  },
+  {
+    # Self-hosted Langfuse behind Cloudflare Access: requests must carry the
+    # service-token headers or Cloudflare blocks them before Langfuse sees them.
+    name       = "internal-agent"
+    public_key = "pk-lf-zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"
+    secret_key = "sk-lf-zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"
+    host       = "https://langfuse.internal.example.com"
+    extra_headers = {
+      "CF-Access-Client-Id"     = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.access"
+      "CF-Access-Client-Secret" = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+    }
   },
   {
     name       = "sales-agent"

@@ -176,40 +176,40 @@ SCHEDULER_PAUSED=true \
 > EU: `https://cloud.langfuse.com`. Self-hosted: your own base URL. A mismatched
 > host authenticates against the wrong region and returns no traces.
 
-> **Host behind Cloudflare Access (or another authenticating proxy)?** Add
-> `extra_headers` to that project's entry — the exporter sends them on every
-> request. For a Cloudflare Access [service token](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/):
+> **Extra request headers (`extra_headers`).** If a project's host requires
+> additional headers on every request — typically because it sits behind an
+> authenticating proxy, API gateway, or WAF (e.g. Cloudflare Access) — add an
+> `extra_headers` map to that project's entry. The exporter sends these headers
+> verbatim on **every** request to that host, alongside the Langfuse key pair
+> (which stays in the `Authorization` header as usual — the two don't conflict):
 >
 > ```hcl
 > { name = "internal-agent", public_key = "pk-lf-...", secret_key = "sk-lf-...",
 >   host = "https://langfuse.internal.example.com",
 >   extra_headers = {
->     "CF-Access-Client-Id"     = "<client-id>.access"
->     "CF-Access-Client-Secret" = "<client-secret>"
+>     "<Header-Name>"         = "<value>"
+>     "<Another-Header-Name>" = "<value>"
 >   } }
 > ```
 >
-> The headers are stored in Secret Manager and injected into the job at runtime
-> — like the API keys, they never land in the image, logs, or shell history.
-> Without them, Cloudflare blocks the request before Langfuse ever sees it.
-> Note: service tokens expire (default one year) — rotate by updating the tfvars
-> entry and re-running `deploy.sh`.
+> Header values are treated as credentials: stored in Secret Manager and
+> injected into the job at runtime — like the API keys, they never land in the
+> image, logs, or shell history. To change or rotate a value, update the tfvars
+> entry and re-run `deploy.sh`. Projects without `extra_headers` are unaffected.
 >
-> **Verify the token before deploying** (create it under Zero Trust → Access →
-> Service Tokens, and make sure the Langfuse Access application has a
-> *Service Auth* policy allowing it):
+> **Verify before deploying** — confirm the headers get you through to the
+> Langfuse API with one command:
 >
 > ```bash
 > curl -s -o /dev/null -w "%{http_code}" \
->   -H "CF-Access-Client-Id: <client-id>.access" \
->   -H "CF-Access-Client-Secret: <client-secret>" \
+>   -H "<Header-Name>: <value>" \
 >   -u "pk-lf-...:sk-lf-..." \
 >   "https://langfuse.<your-domain>/api/public/traces?limit=1"
 > ```
 >
-> `200` means the whole chain works (Cloudflare accepts the token *and* Langfuse
-> accepts the keys); `403` means the Access policy doesn't allow the token;
-> `401` means the Langfuse key pair is wrong for that host.
+> `200` means the whole chain works (the proxy accepts the headers *and*
+> Langfuse accepts the keys); `403` usually means the proxy rejected the
+> headers; `401` means the Langfuse key pair is wrong for that host.
 
 > **Multiple projects, one bucket.** Every project's masked traces land in the
 > **same** masked bucket under its own subdir (`exports/<name>/`), so Kota still

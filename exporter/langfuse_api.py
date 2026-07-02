@@ -49,12 +49,18 @@ class LangfuseAPIClient:
         host: str,
         public_key: str,
         secret_key: str,
+        extra_headers: Optional[dict[str, str]] = None,
     ) -> None:
         self._host = host.rstrip("/")
+        headers = {"Accept": "application/json"}
+        if extra_headers:
+            # e.g. Cloudflare Access service-token headers for an auth-proxied
+            # self-hosted Langfuse (CF-Access-Client-Id / CF-Access-Client-Secret).
+            headers.update(extra_headers)
         self._client = httpx.AsyncClient(
             base_url=self._host,
             auth=(public_key, secret_key),
-            headers={"Accept": "application/json"},
+            headers=headers,
             timeout=_REQUEST_TIMEOUT,
         )
 

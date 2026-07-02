@@ -41,7 +41,10 @@ sys.path.insert(0, str(_HERE.parents[0] / "exporter"))
 from langfuse_api import LangfuseAPIClient  # noqa: E402
 
 MAX_INSPECT_BYTES = 200_000
-TRANSCRIPT_FIELDS = ("input", "output")
+# Fields the report inspects — must mirror the job's masked set (deidentify_core
+# DEFAULT_MASKED_FIELDS) so the findings report doesn't hide PII in fields the job
+# masks (notably `tags`, where our confirmed leak lives). Was ("input","output").
+INSPECT_FIELDS = ("input", "output", "metadata", "userId", "tags")
 
 
 def _parent(project, region):
@@ -50,17 +53,34 @@ def _parent(project, region):
 
 def _transcript_text(record):
     parts = []
-    for key in TRANSCRIPT_FIELDS:
+    for key in INSPECT_FIELDS:
         value = record.get(key)
         if value is not None:
             parts.append(json.dumps(value, ensure_ascii=False))
     return "\n".join(parts)
 
 
-async def _pull(host, public_key, secret_key, lookback_seconds, max_traces):
+def _extra_headers(slug=None):
+    """Optional per-request headers (Cloudflare Access etc.), mirroring the
+    exporter (main.py). Global CF_ACCESS_CLIENT_ID/SECRET plus optional
+    LF_HDR_<SLUG> JSON. Returns None when unset (no-op)."""
+    headers = {}
+    if slug:
+        raw = os.environ.get(f"LF_HDR_{slug}")
+        if raw:
+            headers.update(json.loads(raw))
+    cid = os.environ.get("CF_ACCESS_CLIENT_ID")
+    csec = os.environ.get("CF_ACCESS_CLIENT_SECRET")
+    if cid and csec:
+        headers["CF-Access-Client-Id"] = cid
+        headers["CF-Access-Client-Secret"] = csec
+    return headers or None
+
+
+async def _pull(host, public_key, secret_key, lookback_seconds, max_traces, extra_headers=None):
     since = int(time.time()) - lookback_seconds
     records = []
-    async with LangfuseAPIClient(host, public_key, secret_key) as client:
+    async with LangfuseAPIClient(host, public_key, secret_key, extra_headers) as client:
         async for summary in client.iter_trace_summaries_since(since):
             records.append(await client.get_trace_details(summary["id"]))
             if len(records) >= max_traces:
@@ -96,9 +116,9 @@ def _env_slug(name):
     return name.upper().replace("-", "_")
 
 
-def _run_report(dlp_client, parent, args, host, public_key, secret_key, label):
+def _run_report(dlp_client, parent, args, host, public_key, secret_key, label, extra_headers=None):
     records = asyncio.run(
-        _pull(host, public_key, secret_key, args.lookback_seconds, args.max_traces)
+        _pull(host, public_key, secret_key, args.lookback_seconds, args.max_traces, extra_headers)
     )
 
     print("=" * 70)
@@ -178,6 +198,7 @@ def main():
                 os.environ[f"LF_PUB_{slug}"],
                 os.environ[f"LF_SEC_{slug}"],
                 f" — {name}",
+                _extra_headers(slug),
             )
         return
 
@@ -189,6 +210,7 @@ def main():
         os.environ["LANGFUSE_PUBLIC_KEY"],
         os.environ["LANGFUSE_SECRET_KEY"],
         "",
+        _extra_headers(),
     )
 
 

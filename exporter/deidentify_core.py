@@ -50,8 +50,16 @@ DEFAULT_DLP_TIMEOUT = 120
 
 # Fields that are DLP-masked (the free-text transcript plus metadata, which can
 # carry PII). Masked wherever they appear (trace + observations). Every other
-# field is kept as-is.
-MASKED_FIELDS = ("input", "output", "metadata")
+# field is kept as-is. This is the DEFAULT — override per-deployment via the
+# `masked_fields` DlpMasker arg (wired to an env var / TF variable). `userId` and
+# `tags` are included because they routinely carry PII in real Langfuse traffic.
+DEFAULT_MASKED_FIELDS = ("input", "output", "metadata", "userId", "tags")
+# Tag entries with these prefixes are DROPPED entirely before DLP: they are
+# structured identifiers (a raw email, a tenant slug), not free text, so DLP
+# won't reliably detect them (e.g. `account:<slug>` is no infoType). Configurable.
+DEFAULT_DROP_TAG_PREFIXES = ("email:", "account:")
+# Backwards-compatible alias for callers that referenced the old constant.
+MASKED_FIELDS = DEFAULT_MASKED_FIELDS
 
 
 def _string_leaves(node, refs):
@@ -104,6 +112,8 @@ class DlpMasker:
         rate_limiter,
         max_bytes=DEFAULT_MAX_BATCH_BYTES,
         timeout=DEFAULT_DLP_TIMEOUT,
+        masked_fields=DEFAULT_MASKED_FIELDS,
+        drop_tag_prefixes=DEFAULT_DROP_TAG_PREFIXES,
     ):
         self.client = client
         self.parent = parent
@@ -112,6 +122,8 @@ class DlpMasker:
         self.rate_limiter = rate_limiter
         self.max_bytes = max_bytes
         self.timeout = timeout
+        self.masked_fields = tuple(masked_fields)
+        self.drop_tag_prefixes = tuple(drop_tag_prefixes)
 
     @retry(
         stop=stop_after_attempt(6),
@@ -220,15 +232,27 @@ class DlpMasker:
             container[key] = masked_text
 
     def _collect_mask_refs(self, container, refs):
-        """Add string-leaf refs for the MASKED_FIELDS of `container`. A field that
-        is itself a string is one leaf; a nested field (dict/list) contributes all
-        of its string leaves."""
-        for key in MASKED_FIELDS:
+        """Add string-leaf refs for the configured masked fields of `container`.
+        A field that is itself a string is one leaf; a nested field (dict/list)
+        contributes all of its string leaves."""
+        for key in self.masked_fields:
             value = container.get(key)
             if isinstance(value, str):
                 refs.append((container, key))
             elif isinstance(value, (dict, list)):
                 _string_leaves(value, refs)
+
+    def _drop_tags(self, container):
+        """Remove tag entries whose prefix is in `drop_tag_prefixes` (identifiers
+        like `email:` / `account:` that DLP can't reliably detect). No-op if the
+        drop set is empty or `tags` is absent/not a list."""
+        tags = container.get("tags")
+        if isinstance(tags, list) and self.drop_tag_prefixes:
+            container["tags"] = [
+                t
+                for t in tags
+                if not (isinstance(t, str) and t.startswith(self.drop_tag_prefixes))
+            ]
 
     def mask_record(self, record):
         """Keep the whole trace intact; DLP-mask only `input`, `output`, and
@@ -240,6 +264,7 @@ class DlpMasker:
         probabilistic, so the result is reduced-sensitivity data, not a guarantee
         of zero PII; any PII that lives outside the masked fields is passed
         through unchanged."""
+        self._drop_tags(record)
         refs = []
         self._collect_mask_refs(record, refs)
         observations = record.get("observations")

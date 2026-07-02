@@ -57,6 +57,26 @@ def _project_env_slug(name):
     return name.upper().replace("-", "_")
 
 
+def _extra_headers(slug):
+    """Optional per-request headers for the Langfuse client (empty by default).
+
+    Supports self-hosted Langfuse behind an auth proxy (e.g. Cloudflare Access):
+      - CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET  -> CF-Access-Client-Id/Secret
+      - LF_HDR_<SLUG>  -> a JSON object of arbitrary extra headers for that project
+    Returns None when nothing is configured so the client is a no-op for
+    deployments (local, EU/US SaaS) that need no extra headers."""
+    headers = {}
+    raw = _env(f"LF_HDR_{slug}")
+    if raw:
+        headers.update(json.loads(raw))
+    cid = _env("CF_ACCESS_CLIENT_ID")
+    csec = _env("CF_ACCESS_CLIENT_SECRET")
+    if cid and csec:
+        headers["CF-Access-Client-Id"] = cid
+        headers["CF-Access-Client-Secret"] = csec
+    return headers or None
+
+
 def _watermark_object(name):
     return f"watermark-{name}.json"
 
@@ -100,6 +120,7 @@ async def _stream_export(proj, masker, storage_client, masked_bucket, masked_pre
     slug = _project_env_slug(name)
     public_key = _env(f"LF_PUB_{slug}", required=True)
     secret_key = _env(f"LF_SEC_{slug}", required=True)
+    extra_headers = _extra_headers(slug)
     state_object = _watermark_object(name)
 
     run_ts = int(time.time())
@@ -128,7 +149,7 @@ async def _stream_export(proj, masker, storage_client, masked_bucket, masked_pre
         written += len(chunk)
         chunk = []
 
-    async with LangfuseAPIClient(host, public_key, secret_key) as client:
+    async with LangfuseAPIClient(host, public_key, secret_key, extra_headers) as client:
         async for summary in client.iter_trace_summaries_since(watermark):
             record = await client.get_trace_details(summary["id"])
             seconds = _trace_epoch_seconds(record)

@@ -1,11 +1,12 @@
 """Core de-identify logic, shared by the Cloud Run job and the e2e check.
 
 Strategy: **keep the whole trace, mask a fixed set of fields**. Per record we
-DLP-mask `input`, `output`, and `metadata` — on the trace and on each observation
-(their full string-leaf subtree) — replacing detected PII with `[INFO_TYPE]`
-placeholders. Every other field (ids, timestamps, `userId`, `tags`, costs,
-type/name) is preserved AS-IS: not masked, not dropped. Kota receives the full
-trace with only those fields scrubbed.
+DLP-mask `input`, `output`, `metadata`, `tags`, and `statusMessage` — on the
+trace and on each observation (their full string-leaf subtree) — replacing
+detected PII with `[INFO_TYPE]` placeholders. Every other field (ids,
+timestamps, `userId`, costs, type/name, `scores`) is preserved AS-IS: not
+masked, not dropped. Kota receives the full trace with only those fields
+scrubbed.
 
 Because detection is DLP-based (probabilistic) and limited to the masked fields,
 the result is reduced-sensitivity data, not a guarantee of zero PII — any PII
@@ -48,10 +49,12 @@ DEFAULT_MAX_RPM = 500
 # raises DeadlineExceeded and is retried, instead of hanging the run silently.
 DEFAULT_DLP_TIMEOUT = 120
 
-# Fields that are DLP-masked (the free-text transcript plus metadata, which can
-# carry PII). Masked wherever they appear (trace + observations). Every other
-# field is kept as-is.
-MASKED_FIELDS = ("input", "output", "metadata")
+# Fields that are DLP-masked: the free-text transcript, metadata, trace `tags`
+# (free-form strings set by app code), and observation `statusMessage` (error
+# text can quote user content). One tuple applied to trace + observations; a
+# field absent on a container (`tags` on observations, `statusMessage` on the
+# trace) is simply skipped. Every other field is kept as-is.
+MASKED_FIELDS = ("input", "output", "metadata", "tags", "statusMessage")
 
 
 def _string_leaves(node, refs):
@@ -231,15 +234,16 @@ class DlpMasker:
                 _string_leaves(value, refs)
 
     def mask_record(self, record):
-        """Keep the whole trace intact; DLP-mask only `input`, `output`, and
-        `metadata` (on the trace and on each observation).
+        """Keep the whole trace intact; DLP-mask only `input`, `output`,
+        `metadata`, `tags`, and `statusMessage` (on the trace and on each
+        observation).
 
-        Every other field — ids, timestamps, `userId`, `tags`, costs, type/name —
-        is preserved AS-IS (not masked, not dropped). Detected PII in the masked
-        fields is replaced with `[INFO_TYPE]`. Masking is DLP-based and
-        probabilistic, so the result is reduced-sensitivity data, not a guarantee
-        of zero PII; any PII that lives outside the masked fields is passed
-        through unchanged."""
+        Every other field — ids, timestamps, `userId`, costs, type/name, and
+        `scores` (including comments/values) — is preserved AS-IS (not masked,
+        not dropped). Detected PII in the masked fields is replaced with
+        `[INFO_TYPE]`. Masking is DLP-based and probabilistic, so the result is
+        reduced-sensitivity data, not a guarantee of zero PII; any PII that
+        lives outside the masked fields is passed through unchanged."""
         refs = []
         self._collect_mask_refs(record, refs)
         observations = record.get("observations")

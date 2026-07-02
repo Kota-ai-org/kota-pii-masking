@@ -83,16 +83,17 @@ Everything runs in **your** project. The module creates:
   instantly — no key to chase.
 - **You own the masking policy.** Both DLP templates live in your project; tune
   detection/transformation anytime, no Kota redeploy.
-- **Whole trace kept; `input`/`output`/`metadata` masked.** The job preserves the
-  full trace structure (nothing dropped) and runs DLP over `input`, `output`, and
-  `metadata` — on the trace and each observation — replacing detected PII with
-  `[INFO_TYPE]`. All other fields (`userId`, `tags`, ids, timestamps, costs,
-  type/name) are passed through **as-is**.
-- **Residual-PII caveat (shared responsibility).** Masking is limited to
-  input/output/metadata and is DLP-based/probabilistic — strong on structured PII
+- **Whole trace kept; `input`/`output`/`metadata`/`tags`/`statusMessage`
+  masked.** The job preserves the full trace structure (nothing dropped) and
+  runs DLP over `input`, `output`, `metadata`, trace `tags`, and observation
+  `statusMessage` — replacing detected PII with `[INFO_TYPE]`. All other fields
+  (`userId`, ids, timestamps, costs, type/name, `scores`) are passed through
+  **as-is**.
+- **Residual-PII caveat (shared responsibility).** Masking is limited to the
+  fields above and is DLP-based/probabilistic — strong on structured PII
   (emails, cards, SSNs), weaker on free-form names. **PII outside those fields
-  (e.g. in `userId` or `tags`) is NOT masked** — keep such fields free of
-  sensitive data, or extend the masked set. Masking **fails closed per chunk** (a
+  (e.g. in `userId` or in `scores` comments/values) is NOT masked** — keep such
+  fields free of sensitive data, or extend the masked set. Masking **fails closed per chunk** (a
   DLP error doesn't advance that project's watermark). Treat the masked bucket as
   **reduced-sensitivity** data governed by your DPA with Kota, not a guarantee of
   zero PII — tune the inspect template (Section 7) and review a sample before

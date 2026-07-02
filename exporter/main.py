@@ -2,9 +2,10 @@
 
 Runs to completion on a Cloud Scheduler cron. For each configured project it
 streams full TraceWithFullDetails records from the Langfuse public API since a
-persisted watermark (oldest-first), DLP-masks input/output/metadata while keeping
-the whole trace intact (see deidentify_core), and writes them as JSONL to the
-masked bucket in bounded chunks — advancing the watermark after EACH chunk. The
+persisted watermark (oldest-first), DLP-masks input/output/metadata/tags/
+statusMessage while keeping the whole trace intact (see deidentify_core), and
+writes them as JSONL to the masked bucket in bounded chunks — advancing the
+watermark after EACH chunk. The
 masked bucket is the only resource shared with Kota; raw PII never lands in
 storage.
 

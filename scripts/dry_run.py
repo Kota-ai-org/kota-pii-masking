@@ -41,7 +41,10 @@ sys.path.insert(0, str(_HERE.parents[0] / "exporter"))
 from langfuse_api import LangfuseAPIClient  # noqa: E402
 
 MAX_INSPECT_BYTES = 200_000
-TRANSCRIPT_FIELDS = ("input", "output")
+# Trace-level fields sampled into the findings report — kept in sync with the
+# exporter's MASKED_FIELDS (statusMessage is observation-level and not walked
+# by this trace-top-level preview).
+TRANSCRIPT_FIELDS = ("input", "output", "metadata", "tags")
 
 
 def _parent(project, region):

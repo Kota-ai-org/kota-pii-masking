@@ -46,12 +46,23 @@ variable "langfuse_projects" {
     env-var the exporter reads — keep it short, lowercase, hyphenated.
     `host` is per-project and optional (defaults to Langfuse US cloud); set it to
     https://cloud.langfuse.com for EU or to your self-hosted base URL.
+
+    `extra_headers` (optional) is sent verbatim on every request to that
+    project's host — use it when the host sits behind a proxy that requires
+    its own credentials, e.g. Cloudflare Access service tokens:
+      extra_headers = {
+        "CF-Access-Client-Id"     = "<id>.access"
+        "CF-Access-Client-Secret" = "<secret>"
+      }
+    Header values are stored in Secret Manager (never in the image, manifest,
+    or shell history) and injected into the job at runtime, like the API keys.
   EOT
   type = list(object({
-    name       = string
-    public_key = string
-    secret_key = string
-    host       = optional(string, "https://us.cloud.langfuse.com")
+    name          = string
+    public_key    = string
+    secret_key    = string
+    host          = optional(string, "https://us.cloud.langfuse.com")
+    extra_headers = optional(map(string), {})
   }))
   sensitive = true
 

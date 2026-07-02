@@ -28,6 +28,14 @@ locals {
   langfuse_manifest = nonsensitive(jsonencode([
     for p in var.langfuse_projects : { name = p.name, host = p.host }
   ]))
+
+  # Projects that need proxy headers (e.g. Cloudflare Access service tokens).
+  # Only these get an extra-headers secret + LF_HDR_<SLUG> env var; header
+  # values may be credentials, so they follow the same Secret Manager path as
+  # the API keys. Names are non-sensitive (required for for_each keys).
+  langfuse_projects_with_headers = nonsensitive(toset([
+    for p in var.langfuse_projects : p.name if length(p.extra_headers) > 0
+  ]))
 }
 
 ###############################################################################
@@ -188,6 +196,27 @@ resource "google_secret_manager_secret_version" "langfuse_secret_key" {
   secret_data = local.langfuse_projects[each.key].secret_key
 }
 
+# Extra request headers for hosts behind an authenticating proxy (e.g.
+# Cloudflare Access service tokens). Stored as a JSON object of header
+# name -> value; values are credentials, so the whole map lives in Secret
+# Manager. Created only for projects that set extra_headers.
+resource "google_secret_manager_secret" "langfuse_extra_headers" {
+  for_each  = local.langfuse_projects_with_headers
+  secret_id = "${var.name_prefix}-langfuse-extra-headers-${each.key}"
+  project   = var.project_id
+  labels    = local.common_labels
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.required]
+}
+
+resource "google_secret_manager_secret_version" "langfuse_extra_headers" {
+  for_each    = local.langfuse_projects_with_headers
+  secret      = google_secret_manager_secret.langfuse_extra_headers[each.key].id
+  secret_data = jsonencode(local.langfuse_projects[each.key].extra_headers)
+}
+
 ###############################################################################
 # Exporter Cloud Run job (pulls Langfuse traces, DLP-masks, writes masked JSONL)
 #
@@ -239,6 +268,14 @@ resource "google_secret_manager_secret_iam_member" "exporter_public_key" {
 resource "google_secret_manager_secret_iam_member" "exporter_secret_key" {
   for_each  = local.langfuse_project_names
   secret_id = google_secret_manager_secret.langfuse_secret_key[each.key].secret_id
+  project   = var.project_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.exporter.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "exporter_extra_headers" {
+  for_each  = local.langfuse_projects_with_headers
+  secret_id = google_secret_manager_secret.langfuse_extra_headers[each.key].secret_id
   project   = var.project_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.exporter.email}"
@@ -337,6 +374,21 @@ resource "google_cloud_run_v2_job" "exporter" {
             value_source {
               secret_key_ref {
                 secret  = google_secret_manager_secret.langfuse_secret_key[env.key].secret_id
+                version = "latest"
+              }
+            }
+          }
+        }
+
+        # Optional proxy headers (JSON object), only for projects that set
+        # extra_headers — e.g. Cloudflare Access service-token credentials.
+        dynamic "env" {
+          for_each = local.langfuse_projects_with_headers
+          content {
+            name = "LF_HDR_${upper(replace(env.key, "-", "_"))}"
+            value_source {
+              secret_key_ref {
+                secret  = google_secret_manager_secret.langfuse_extra_headers[env.key].secret_id
                 version = "latest"
               }
             }
